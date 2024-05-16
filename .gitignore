@@ -1,0 +1,4 @@
+.*        # Ignore files starting with a dot
+_*        # Ignore files starting with an underscore
+__*
+
