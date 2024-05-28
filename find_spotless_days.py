@@ -5,7 +5,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 import os
-os.environ['CDF_LIB'] = '/home/peijin/cdf/cdf38_0-dist/lib'
+# os.environ['CDF_LIB'] = '/home/peijin/cdf/cdf38_0-dist/lib'
 
 import sys
 import time
