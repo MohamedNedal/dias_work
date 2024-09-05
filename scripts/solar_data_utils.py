@@ -14,6 +14,24 @@ from scipy.ndimage import gaussian_filter
 from astropy.visualization import ImageNormalize, PercentileInterval
 from sunpy import timeseries as ts
 import matplotlib.dates as mdates
+from PIL import Image
+
+
+
+
+
+
+
+
+def png_to_gif(path=None):
+    # set the path to the folder containing the PNG images
+    # get a list of all PNG files in the folder
+    files = sorted([f for f in os.listdir(path) if f.endswith('.png')])
+    files.sort(key=lambda x: (x == 'burst0', int(re.findall(r'\d+', x)[0].lstrip('0') or '0'), x))
+    # create a list of image objects from the PNG files
+    images = [Image.open(path + f) for f in files]
+    # create an animated GIF from the list of images
+    images[0].save(f'{path}/animation.gif', save_all=True, append_images=images[1:], duration=300, loop=0)
 
 
 
@@ -136,50 +154,72 @@ def fetch_aia(data_dir=None, start=None, end=None, channel=193):
 
 
 
-
-# dt_dict = myfuncs.split_datetime(start=start, end=end)
-
-# data_path = f'{data_dir}/AIA/{channel}A'
-# data = sorted(glob.glob(f'{data_path}/aia_lev1_{channel}a_*.fits'))
-
-# start_filename = f"aia_lev1_{channel}a_{dt_dict['start_year']}_{dt_dict['start_month']}_{dt_dict['start_day']}t{dt_dict['start_hour']}_{dt_dict['start_minute']}"
-# end_filename   = f"aia_lev1_{channel}a_{dt_dict['end_year']}_{dt_dict['end_month']}_{dt_dict['end_day']}t{dt_dict['end_hour']}_{dt_dict['end_minute']}"
-
-# first_file_to_find = sorted(glob.glob(f'{data_path}/{start_filename}*.fits'))
-# last_file_to_find  = sorted(glob.glob(f'{data_path}/{end_filename}*.fits'))
-
-# if len(first_file_to_find) == 0 or len(last_file_to_find) == 0:
-#     # download AIA data
-#     data = myfuncs.fetch_aia(data_dir=data_path, start=start, end=end, channel=channel)
-
-#     start_filename = f"aia_lev1_{channel}a_{dt_dict['start_year']}_{dt_dict['start_month']}_{dt_dict['start_day']}t{dt_dict['start_hour']}_{dt_dict['start_minute']}"
-#     end_filename   = f"aia_lev1_{channel}a_{dt_dict['end_year']}_{dt_dict['end_month']}_{dt_dict['end_day']}t{dt_dict['end_hour']}_{dt_dict['end_minute']}"
+def load_aia(data_dir=None, start=None, end=None, level=1.5, promote=False, channel=193):
     
-#     first_file_to_find = sorted(glob.glob(f'{data_path}/{start_filename}*.fits'))
-#     last_file_to_find  = sorted(glob.glob(f'{data_path}/{end_filename}*.fits'))
+    # Check if the datetime is a string
+    if isinstance(start, str) and isinstance(end, str):
+        dt_dict = split_datetime(start=start, end=end)
+    
+    # Check if the datetime is a pandas.Timestamp
+    elif isinstance(start, pd.Timestamp) and isinstance(end, pd.Timestamp):
+        dt_dict = split_datetime(start=str(start).replace(' ','T'), end=str(end).replace(' ','T'))
+    
+    if level == 1.5:
+        data_path = f'{data_dir}/AIA/{channel}A/lv15'
+    else:
+        data_path = f'{data_dir}/AIA/{channel}A'
+    
+    data = sorted(glob.glob(f'{data_path}/aia*{channel}a_*.fits'))
+    start_filename = f"aia*{channel}a_{dt_dict['start_year']}_{dt_dict['start_month']}_{dt_dict['start_day']}T{dt_dict['start_hour']}_{dt_dict['start_minute']}"
+    end_filename   = f"aia*{channel}a_{dt_dict['end_year']}_{dt_dict['end_month']}_{dt_dict['end_day']}T{dt_dict['end_hour']}_{dt_dict['end_minute']}"
 
-# idx1 = data.index(first_file_to_find[0])
-# idx2 = data.index(last_file_to_find[0])
+    if level == 1:
+        start_filename = start_filename.replace('T', 't')
+        end_filename   = end_filename.replace('T', 't')
+    
+    first_file_to_find = sorted(glob.glob(f'{data_path}/{start_filename}*.fits'))
+    last_file_to_find  = sorted(glob.glob(f'{data_path}/{end_filename}*.fits'))
+    
+    # if len(first_file_to_find) == 0 or len(last_file_to_find) == 0:
+    #     # download AIA data
+    #     data = myfuncs.fetch_aia(data_dir=data_path, start=start, end=end, channel=channel)
+    
+    #     start_filename = f"aia_lev1_{channel}a_{dt_dict['start_year']}_{dt_dict['start_month']}_{dt_dict['start_day']}t{dt_dict['start_hour']}_{dt_dict['start_minute']}"
+    #     end_filename   = f"aia_lev1_{channel}a_{dt_dict['end_year']}_{dt_dict['end_month']}_{dt_dict['end_day']}t{dt_dict['end_hour']}_{dt_dict['end_minute']}"
+        
+    #     first_file_to_find = sorted(glob.glob(f'{data_path}/{start_filename}*.fits'))
+    #     last_file_to_find  = sorted(glob.glob(f'{data_path}/{end_filename}*.fits'))
+    
+    idx1 = data.index(first_file_to_find[0])
+    idx2 = data.index(last_file_to_find[0])
+    
+    chosen_files = data[idx1:idx2]
+    
+    map_objects = []
+    for i, file in enumerate(chosen_files):
+        # load the file as a sunpy map
+        m = sunpy.map.Map(file)
+        print(f'AIA {channel}A image {i} is loaded')
 
-# chosen_files = data[idx1:idx2]
-
-# map_objects = []
-# for i, file in enumerate(chosen_files):
-#     # load the file as a sunpy map
-#     m = sunpy.map.Map(file)
-#     print(f'AIA {channel}A image {i} is loaded')
-#     if promote:
-#         # update the metadata of the map to the most recent pointing
-#         m_updated = update_pointing(m)
-#         # scale the image to the 0.6"/pix
-#         # and derotate the image such that the y-axis is aligned with solar North
-#         m_registered = register(m_updated)
-#         # exposure time normalization
-#         m_normalized = m_registered / m_registered.exposure_time
-#         map_objects.append(m_normalized)
-#     else:
-#         map_objects.append(m)
-# return map_objects
+        if level == 1:
+            if promote:
+                print(f'{i} Upgrade AIA {channel} map to lv1.5')
+                # update the metadata of the map to the most recent pointing
+                m_updated = update_pointing(m)
+                # scale the image to the 0.6"/pix
+                # and derotate the image such that the y-axis is aligned with solar North
+                m_registered = register(m_updated)
+                # exposure time normalization
+                m_normalized = m_registered / m_registered.exposure_time
+                map_objects.append(m_normalized)
+            else:
+                print(f'Append lv1 AIA {channel} map {i}')
+                map_objects.append(m)
+        else:
+            print(f'Append lv1.5 AIA {channel} map {i}')
+            map_objects.append(m)
+    
+    return map_objects
 
 
 
