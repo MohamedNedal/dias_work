@@ -154,7 +154,9 @@ def fetch_aia(data_dir=None, start=None, end=None, channel=193):
 
 
 
-def load_aia(data_dir=None, start=None, end=None, level=1.5, promote=False, channel=193):
+
+
+def load_aia(data_dir=None, start=None, end=None, level=1.5, data_type='highres', promote=False, channel=193):
     
     # Check if the datetime is a string
     if isinstance(start, str) and isinstance(end, str):
@@ -165,17 +167,17 @@ def load_aia(data_dir=None, start=None, end=None, level=1.5, promote=False, chan
         dt_dict = split_datetime(start=str(start).replace(' ','T'), end=str(end).replace(' ','T'))
     
     if level == 1.5:
-        data_path = f'{data_dir}/AIA/{channel}A/lv15'
+        data_path = f'{data_dir}/AIA/{channel}A/{data_type}/lv15'
     else:
-        data_path = f'{data_dir}/AIA/{channel}A'
+        data_path = f'{data_dir}/AIA/{channel}A/{data_type}'
     
-    data = sorted(glob.glob(f'{data_path}/aia*{channel}a_*.fits'))
-    start_filename = f"aia*{channel}a_{dt_dict['start_year']}_{dt_dict['start_month']}_{dt_dict['start_day']}T{dt_dict['start_hour']}_{dt_dict['start_minute']}"
-    end_filename   = f"aia*{channel}a_{dt_dict['end_year']}_{dt_dict['end_month']}_{dt_dict['end_day']}T{dt_dict['end_hour']}_{dt_dict['end_minute']}"
+    data = sorted(glob.glob(f'{data_path}/aia*{channel}A_*.fits'))
+    start_filename = f"aia*{channel}A_{dt_dict['start_year']}_{dt_dict['start_month']}_{dt_dict['start_day']}T{dt_dict['start_hour']}_{dt_dict['start_minute']}_{dt_dict['start_second']}"
+    end_filename   = f"aia*{channel}A_{dt_dict['end_year']}_{dt_dict['end_month']}_{dt_dict['end_day']}T{dt_dict['end_hour']}_{dt_dict['end_minute']}_{dt_dict['end_second']}"
 
-    if level == 1:
-        start_filename = start_filename.replace('T', 't')
-        end_filename   = end_filename.replace('T', 't')
+    # if level == 1:
+    #     start_filename = start_filename.replace('T', 't')
+    #     end_filename   = end_filename.replace('T', 't')
     
     first_file_to_find = sorted(glob.glob(f'{data_path}/{start_filename}*.fits'))
     last_file_to_find  = sorted(glob.glob(f'{data_path}/{end_filename}*.fits'))
@@ -223,7 +225,19 @@ def load_aia(data_dir=None, start=None, end=None, level=1.5, promote=False, chan
 
 
 
-
+def save_processed_aia(data=None, channel=193):
+    for i, processed_map in enumerate(data):
+        text_string = processed_map.meta['date-obs']
+        # make translation table and use it
+        translation_table = str.maketrans('-:.', '___')
+        result = text_string.translate(translation_table)
+        output_filename = f'aia_{channel}a_{result}_lev15'
+        file_path = f'/home/mnedal/data/AIA/{channel}A/lv15/{output_filename}.fits'
+        if not os.path.exists(file_path):
+            processed_map.save(file_path, filetype='auto')
+            print(f'Image {i} is exported')
+        else:
+            print(f'Image {i} exists already')
 
 
 
