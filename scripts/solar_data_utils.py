@@ -169,28 +169,15 @@ def load_aia(data_dir=None, start=None, end=None, level=1.5, data_type='highres'
     if level == 1.5:
         data_path = f'{data_dir}/AIA/{channel}A/{data_type}/lv15'
     else:
-        data_path = f'{data_dir}/AIA/{channel}A/{data_type}'
+        data_path = f'{data_dir}/AIA/{channel}A/{data_type}/lv1'
     
     data = sorted(glob.glob(f'{data_path}/aia*{channel}A_*.fits'))
-    start_filename = f"aia*{channel}A_{dt_dict['start_year']}_{dt_dict['start_month']}_{dt_dict['start_day']}T{dt_dict['start_hour']}_{dt_dict['start_minute']}_{dt_dict['start_second']}"
-    end_filename   = f"aia*{channel}A_{dt_dict['end_year']}_{dt_dict['end_month']}_{dt_dict['end_day']}T{dt_dict['end_hour']}_{dt_dict['end_minute']}_{dt_dict['end_second']}"
-
-    # if level == 1:
-    #     start_filename = start_filename.replace('T', 't')
-    #     end_filename   = end_filename.replace('T', 't')
     
-    first_file_to_find = sorted(glob.glob(f'{data_path}/{start_filename}*.fits'))
-    last_file_to_find  = sorted(glob.glob(f'{data_path}/{end_filename}*.fits'))
+    start_pattern = f"aia*{channel}A_{dt_dict['start_year']}_{dt_dict['start_month']}_{dt_dict['start_day']}T{dt_dict['start_hour']}_{dt_dict['start_minute']}*"
+    end_pattern   = f"aia*{channel}A_{dt_dict['end_year']}_{dt_dict['end_month']}_{dt_dict['end_day']}T{dt_dict['end_hour']}_{dt_dict['end_minute']}*"
     
-    # if len(first_file_to_find) == 0 or len(last_file_to_find) == 0:
-    #     # download AIA data
-    #     data = myfuncs.fetch_aia(data_dir=data_path, start=start, end=end, channel=channel)
-    
-    #     start_filename = f"aia_lev1_{channel}a_{dt_dict['start_year']}_{dt_dict['start_month']}_{dt_dict['start_day']}t{dt_dict['start_hour']}_{dt_dict['start_minute']}"
-    #     end_filename   = f"aia_lev1_{channel}a_{dt_dict['end_year']}_{dt_dict['end_month']}_{dt_dict['end_day']}t{dt_dict['end_hour']}_{dt_dict['end_minute']}"
-        
-    #     first_file_to_find = sorted(glob.glob(f'{data_path}/{start_filename}*.fits'))
-    #     last_file_to_find  = sorted(glob.glob(f'{data_path}/{end_filename}*.fits'))
+    first_file_to_find = sorted(glob.glob(f'{data_path}/{start_pattern}*.fits'))
+    last_file_to_find  = sorted(glob.glob(f'{data_path}/{end_pattern}*.fits'))
     
     idx1 = data.index(first_file_to_find[0])
     idx2 = data.index(last_file_to_find[0])
@@ -220,19 +207,18 @@ def load_aia(data_dir=None, start=None, end=None, level=1.5, data_type='highres'
         else:
             print(f'Append lv1.5 AIA {channel} map {i}')
             map_objects.append(m)
-    
     return map_objects
 
 
 
-def save_processed_aia(data=None, channel=193):
+def save_processed_aia(data_dir=None, data=None, channel=193):
     for i, processed_map in enumerate(data):
         text_string = processed_map.meta['date-obs']
         # make translation table and use it
         translation_table = str.maketrans('-:.', '___')
         result = text_string.translate(translation_table)
         output_filename = f'aia_{channel}a_{result}_lev15'
-        file_path = f'/home/mnedal/data/AIA/{channel}A/lv15/{output_filename}.fits'
+        file_path = f'{data_dir}/AIA/{channel}A/{data_type}/lv15/{output_filename}.fits'
         if not os.path.exists(file_path):
             processed_map.save(file_path, filetype='auto')
             print(f'Image {i} is exported')
@@ -658,7 +644,104 @@ def fetch_PSPfields(data_dir=None, year=None, month=None, day=None, data_version
 
 
 
+def draw_bezier(x1=0, y1=0, x2=0, y2=0, control=[0,0]):
+    """
+    Draw a Bezier curve using the given control points.
+    The curve will be drawn from the point (x1, y1) to the point
+    (x2, y2) using the control points (control[0], control[1]).
+    """
+    A = np.array([x2, y2])
+    B = np.array(control)
+    C = np.array([x1, y1])
 
+    A = A.reshape(2,1)
+    B = B.reshape(2,1)
+    C = C.reshape(2,1)
+    
+    t = np.arange(0, 1, 0.2).reshape(1,-1)
+    
+    # length = len(df.index)
+    # t = np.linspace(0, 1, length).reshape(1,-1)
+    # t = np.arange(0, length, 1).reshape(1,-1)
+    
+    P0 = A * t + (1 - t) * B
+    P1 = B * t + (1 - t) * C
+    Pfinal = P0 * t + (1 - t) * P1
+
+    return Pfinal
+
+
+def extract_bezier_values(array, x1, y1, x2, y2, control):
+    """
+    Extract the values of a Bezier curve at the given control points.
+    The curve will be drawn from the point (x1, y1) to the point
+    (x2, y2) using the control points (control[0], control[1])
+    """
+    Pfinal = draw_bezier(x1, y1, x2, y2, control)
+    x_coords = np.round(Pfinal[0, :]).astype(int)
+    y_coords = np.round(Pfinal[1, :]).astype(int)
+
+    # Clip the coordinates to stay within array bounds
+    x_coords = np.clip(x_coords, 0, array.shape[1] - 1)
+    y_coords = np.clip(y_coords, 0, array.shape[0] - 1)
+
+    # Extract values along the Bézier curve
+    bezier_values = array[y_coords, x_coords]
+    
+    return bezier_values, x_coords, y_coords
+
+
+
+# def extract_bezier_values(array, x1, y1, x2, y2, control):
+#     """
+#     Extract the values of a Bezier curve at the given control points.
+#     The curve will be drawn from the point (x1, y1) to the point
+#     (x2, y2) using the control points (control[0], control[1])
+#     """
+#     Pfinal = draw_bezier(x1, y1, x2, y2, control)
+#     x_coords = Pfinal[0, :]  # Keep as floating-point
+#     y_coords = Pfinal[1, :]  # Keep as floating-point
+
+#     # Clip the coordinates to stay within array bounds
+#     x_coords_int = np.clip(np.round(x_coords).astype(int), 0, array.shape[1] - 1)
+#     y_coords_int = np.clip(np.round(y_coords).astype(int), 0, array.shape[0] - 1)
+
+#     # Extract values along the Bézier curve
+#     bezier_values = array[y_coords_int, x_coords_int]
+    
+#     return bezier_values, x_coords, y_coords
+
+
+
+def generate_number_list(center, offset, count):
+    """
+    Generate a list of numbers around a given center number.
+
+    Parameters:
+    center (int or float): The central number of the list.
+    offset (int or float): The increment by which numbers are spaced from the center.
+    count (int): The number of numbers to include on each side of the center number.
+
+    Returns:
+    list: A list of numbers around the given center.
+
+    Example usage:
+        center_number = 0
+        offset_value = 2
+        count_around = 3
+        number_list = generate_number_list(center_number, offset_value, count_around)
+        print(number_list)
+        [-6, -4, -2, 0, 2, 4, 6]
+    """
+    return [center + offset * i for i in range(-count, count + 1)]
+
+
+
+def compute_standard_error(values_list):
+    values_array = np.array(values_list)
+    mean_values = np.mean(values_array, axis=0)
+    standard_error = np.std(values_array, axis=0, ddof=1) / np.sqrt(values_array.shape[0])
+    return mean_values, standard_error
 
 
 
