@@ -2,7 +2,14 @@
 
 import os
 import glob
+seed_val = 7
+import os
+os.environ['PYTHONHASHSEED'] = str(seed_val)
+import random
+random.seed(seed_val)
 import numpy as np
+np.random.seed(seed_val)
+from scipy.optimize import fsolve as fsolver
 import pandas as pd
 import sunpy
 from astropy import units as u
@@ -15,7 +22,393 @@ from astropy.visualization import ImageNormalize, PercentileInterval
 from sunpy import timeseries as ts
 import matplotlib.dates as mdates
 from PIL import Image
+from astropy.coordinates import SkyCoord
+import matplotlib.pyplot as plt
+from matplotlib import colors
+import matplotlib.colors as mcolors
 
+data_dir = '/home/mnedal/data'
+
+
+
+
+
+
+
+
+
+
+
+def newkirk(r):
+    """
+    Newkirk electron-density model with fundamental emission.
+    `fold` is a multiplicative factor to change the density scaling.
+    """
+    fold = 1
+    return fold*4.2e4*10.**(4.32/r)
+
+
+def omega_pe_r(ne_r, r):
+    ''' 
+    Plasma frequency density relationship.
+    Works only for the fundamental emission.
+    ''' 
+    return 8.93e3*(ne_r(r))**(0.5)*2*np.pi
+
+
+def freq_to_R(f_pe, ne_r=newkirk):
+    """
+    Starting height for a wave frequency.
+    """
+    func = lambda R: f_pe - (omega_pe_r(ne_r, R))/2/np.pi
+    R_solution = fsolver(func, 1.5) # solve the R
+    return R_solution # in solrad unit
+
+
+def get_colors(n):
+    """
+    Generate a list of (n) hex gradiant colors.
+    """
+    cmap = plt.get_cmap('rainbow')
+    colors = [cmap(i) for i in np.linspace(0, 1, n)]
+    hex_colors = [mcolors.to_hex(c) for c in colors]
+    hex_colors[0]  = '#0000ff' # set first color to blue
+    hex_colors[-1] = '#ff0000' # set last color to red
+    return hex_colors
+
+
+def draw_halfSun():
+    theta, phi = np.mgrid[0:np.pi:100j, 0:np.pi:100j]
+    x = np.sin(theta)*np.cos(phi) 
+    y = np.sin(theta)*np.sin(phi) 
+    z = np.cos(theta)
+    # applying rotation matrix to rotate the half of the Sun
+    Rx = np.array([[1, 0, 0],
+                   [0, np.cos(np.deg2rad(0)), -np.sin(np.deg2rad(0))],
+                   [0, np.sin(np.deg2rad(0)), np.cos(np.deg2rad(0))]])
+    x, y, z = np.einsum('ij,jkl->ikl', Rx, np.array([x, y, z]))
+    Rz = np.array([[np.cos(np.deg2rad(-90)), -np.sin(np.deg2rad(-90)), 0],
+                   [np.sin(np.deg2rad(-90)), np.cos(np.deg2rad(-90)), 0],
+                   [0, 0, 1]])
+    x, y, z = np.einsum('ij,jkl->ikl', Rz, np.array([x, y, z]))
+    return x, y, z
+
+
+
+def draw_fullSun():
+    theta, phi = np.mgrid[0:np.pi:100j, 0:2*np.pi:100j]
+    x = np.sin(theta)*np.cos(phi) 
+    y = np.sin(theta)*np.sin(phi) 
+    z = np.cos(theta)
+    return x, y, z
+
+
+
+def split_datetime(start=None, end=None):
+    START_DATE, START_TIME = start.split('T')
+    END_DATE, END_TIME = end.split('T')
+
+    START_YEAR, START_MONTH, START_DAY = START_DATE.split('-')
+    END_YEAR, END_MONTH, END_DAY = END_DATE.split('-')
+
+    START_HOUR, START_MINUTE, START_SECOND = START_TIME.split(':')
+    END_HOUR, END_MINUTE, END_SECOND = END_TIME.split(':')
+
+    datetime_dict = {
+        'start_year': START_YEAR,
+        'start_month': START_MONTH,
+        'start_day': START_DAY,
+        'start_hour': START_HOUR,
+        'start_minute': START_MINUTE,
+        'start_second': START_SECOND,
+        
+        'end_year': END_YEAR,
+        'end_month': END_MONTH,
+        'end_day': END_DAY,
+        'end_hour': END_HOUR,
+        'end_minute': END_MINUTE,
+        'end_second': END_SECOND
+    }
+    return datetime_dict
+
+
+
+
+def plot_line(angle_deg=None, length=None, map_obj=None):
+    """
+    Plot a straight line at an angle in degrees from the solar West.
+    """
+    angle_rad = np.deg2rad(angle_deg)
+    
+    # Define the length of the line (in arcseconds)
+    line_length = length * u.arcsec
+    
+    # Define the center point of the line (e.g., the center of the Sun)
+    center = SkyCoord(0*u.arcsec, 0*u.arcsec, frame=map_obj.coordinate_frame)
+    
+    # Calculate the start and end points of the line
+    start_point = SkyCoord(center.Tx, center.Ty, frame=map_obj.coordinate_frame)
+    end_point   = SkyCoord(center.Tx + line_length * np.cos(angle_rad), 
+                           center.Ty + line_length * np.sin(angle_rad),
+                           frame=map_obj.coordinate_frame)
+    
+    line = SkyCoord([start_point, end_point])
+    return line
+
+
+
+def generate_centered_list(center, difference, num_elements):
+    """
+    Generate a list of numbers centered around a given number with a specified difference
+    between consecutive numbers.
+
+    Parameters:
+    center (int): The central number around which the list is generated.
+    difference (int): The difference between consecutive numbers in the list.
+    num_elements (int): The number of elements before and after the central number.
+
+    Returns:
+    list: A list of numbers centered around the specified central number.
+    """
+    return [center + difference * i for i in range(-num_elements, num_elements + 1)]
+
+
+
+def remove_redundant_maps(maps):
+    """
+    Remove redundant SunPy maps, keeping only one map per unique timestamp.
+
+    Parameters:
+    maps (list): List of SunPy Map objects. Each map is expected to have a 'date-obs' 
+                 key in its metadata that provides the observation timestamp.
+
+    Returns:
+    list: A list of unique SunPy Map objects, one per unique timestamp.
+    
+    Example:
+    >>> unique_maps = remove_redundant_maps(list_of_sunpy_maps)
+    """
+    unique_maps = {}
+    for m in maps:
+        timestamp = m.latex_name
+        if timestamp not in unique_maps:
+            unique_maps[timestamp] = m
+    return list(unique_maps.values())
+
+
+
+def apply_runratio(maps):
+    """
+    Apply running-ratio image technique on EUV images.
+    See: https://iopscience.iop.org/article/10.1088/0004-637X/750/2/134/pdf
+        Inputs: list of EUV sunpy maps.
+        Output: sequence of run-ratio sunpy maps.
+    """
+    runratio = [m / prev_m.quantity for m, prev_m in zip(maps[1:], maps[:-1])]
+    m_seq_runratio = sunpy.map.Map(runratio, sequence=True)
+    
+    for m in m_seq_runratio:
+        m.data[np.isnan(m.data)] = 1
+        m.plot_settings['norm'] = colors.Normalize(vmin=0, vmax=2)
+        m.plot_settings['cmap'] = 'Greys_r'
+    
+    return m_seq_runratio
+
+
+
+def enhance_contrast(image, vmin, vmax):
+    """
+    Enhance contrast by clipping and normalization.
+    """
+    image_clipped = np.clip(image, vmin, vmax)
+    image_normalized = (image_clipped - vmin) / (vmax - vmin)
+    return image_normalized
+
+
+
+def calculate_percentiles(image, lower_percentile=3, upper_percentile=97):
+    """
+    Calculate vmin and vmax based on the 1st and 99th percentiles.
+    """
+    vmin = np.percentile(image, lower_percentile)
+    vmax = np.percentile(image, upper_percentile)
+    return vmin, vmax
+
+
+
+def round_obstime(time=None):
+    """
+    Round the observation time to put it in the image title.
+    Input : str, time (HH:MM:SS.sss)
+    Output: str, datetime (YYYY-mm-DD HH:MM:SS)
+    """
+    from datetime import datetime, timedelta
+
+    original_time_str = time
+
+    # Convert the original time string to a datetime object
+    original_time = datetime.strptime(original_time_str, '%H:%M:%S.%f')
+
+    # Round the time to the nearest second
+    rounded_time = original_time + timedelta(seconds=round(original_time.microsecond / 1e6))
+
+    # Format the rounded time as 'HH:MM:SS'
+    rounded_time_str = rounded_time.strftime('%H:%M:%S')
+    
+    return rounded_time_str
+
+
+
+def load_lasco(data_dir=None, start=None, end=None, detector='C2'):
+    """
+    Load SOHO/LASCO C2 or C3 images as sunpy maps.
+    """
+    dt_dict = split_datetime(start=start, end=end)
+    data = sorted(glob.glob(f"{data_dir}/LASCO_{detector}/LASCO_{detector}_{dt_dict['start_year']}{dt_dict['start_month']}{dt_dict['start_day']}*.jp2"))
+    
+    start_file_to_find = f"{data_dir}/LASCO_{detector}/LASCO_{detector}_{dt_dict['end_year']}{dt_dict['start_month']}{dt_dict['start_day']}T{dt_dict['start_hour']}{dt_dict['start_minute']}.jp2"
+    end_file_to_find = f"{data_dir}/LASCO_{detector}/LASCO_{detector}_{dt_dict['end_year']}{dt_dict['end_month']}{dt_dict['end_day']}T{dt_dict['end_hour']}{dt_dict['end_minute']}.jp2"
+    
+    idx1 = data.index(start_file_to_find)
+    idx2 = data.index(end_file_to_find)
+    chosen_files = data[idx1:idx2]
+    
+    map_objects = []
+    for i, file in enumerate(chosen_files):
+        m = sunpy.map.Map(file)
+        m.meta['bunit'] = 'ct' # a workaround for C2 and C3 jp2 images
+        m.plot_settings['norm'] = ImageNormalize(vmin=0, vmax=250)
+        map_objects.append(m)
+        print(f'LASCO {detector} image {i} is done')
+    return map_objects
+
+
+
+def generate_number_list_float(center, offset, count):
+    """
+    Generate a list of numbers around a given center number.
+
+    Parameters:
+    center (int or float): The central number of the list.
+    offset (int or float): The increment by which numbers are spaced from the center.
+    count (int): The number of numbers to include on each side of the center number.
+
+    Returns:
+    list: A list of numbers around the given center.
+
+    Example usage:
+        center_number = 0
+        offset_value = 2
+        count_around = 3
+        number_list = generate_number_list(center_number, offset_value, count_around)
+        print(number_list)
+        [-6, -4, -2, 0, 2, 4, 6]
+    """
+    return [center + offset * i for i in range(-count, count + 1)]
+
+
+
+def generate_number_list_time(center, offset, count):
+    """
+    Generate a list of time numbers around a given center date number.
+
+    Parameters:
+    center (int or float): The central date number of the list.
+    offset (int or float): The increment by which numbers are spaced from the center, in minutes.
+    count (int): The number of numbers to include on each side of the center number.
+
+    Returns:
+    list: A list of date numbers around the given center.
+
+    Example usage:
+        center_number = 19857.763069 # equivalent to 2024-05-14 18:18:49.161600+00:00
+        offset_value = 2 # in minutes
+        count_around = 2
+        number_list = generate_number_list_time(center_number, offset_value, count_around)
+        print(number_list)
+    """
+    # Convert center date number to datetime object
+    center_date = mdates.num2date(center)
+
+    # Generate list of date numbers
+    list_dates = []
+    for i in range(-count, count + 1):
+        # Calculate the new date by adding the offset in minutes
+        new_date = center_date + timedelta(minutes=offset * i)
+        # Convert the datetime object back to a date number
+        new_date_number = mdates.date2num(new_date)
+        list_dates.append(new_date_number)
+    
+    return list_dates
+
+
+
+def onclick(event):
+    """
+    This function is called when the mouse is clicked on the figure.
+    It adds the x and y coordinates of the click to the coords list.
+    """
+    global current_trial, text_handle
+
+    if event.button == 1:  # Left mouse button
+        xx, yy = event.xdata, event.ydata  # Get the central x and y coordinates
+        ax.plot(xx, yy, 'ro', markersize=7)
+        plt.draw()
+
+        # Store the coordinates in the current trial's list
+        feature_coords_slit[f'trial_{current_trial}'].append((xx, yy))
+        
+        # Update the text on the plot
+        if text_handle:
+            text_handle.remove()  # Remove the previous text
+        text_handle = ax.text(0.05, 0.95, f"Trial {current_trial + 1}: Captured ({xx:.2f}, {yy:.2f})", 
+                              transform=ax.transAxes, fontsize=12, verticalalignment='top', color='pink')
+        plt.draw()
+
+    elif event.button == 3:  # Right mouse button
+        # Move to the next trial
+        current_trial += 1
+        if current_trial >= num_repeats:
+            fig.canvas.mpl_disconnect(cid)
+            plt.close(fig)  # Close the figure window
+        else:
+            if text_handle:
+                text_handle.remove()
+            text_handle = ax.text(0.05, 0.95, f"Moving to trial {current_trial + 1}", 
+                                  transform=ax.transAxes, fontsize=12, verticalalignment='top', color='cyan')
+            plt.draw()
+
+
+def compute_standard_error(coords_dict):
+    # Extract all trials
+    trials = list(coords_dict.values())
+    num_points = len(trials[0])  # Number of points in each trial
+
+    # Initialize lists to store standard errors
+    mean_values = []
+    standard_errors = []
+
+    # Loop over each point position
+    for point_idx in range(num_points):
+        # Extract x and y values for this point across all trials
+        x_values = [trials[trial_idx][point_idx][0] for trial_idx in range(len(trials))]
+        y_values = [trials[trial_idx][point_idx][1] for trial_idx in range(len(trials))]
+
+        # Convert to numpy arrays
+        x_values = np.array(x_values)
+        y_values = np.array(y_values)
+
+        # Compute mean and standard error for this point
+        mean_x = np.mean(x_values)
+        mean_y = np.mean(y_values)
+        se_x = np.std(x_values, ddof=1) / np.sqrt(len(x_values))
+        se_y = np.std(y_values, ddof=1) / np.sqrt(len(y_values))
+
+        # Store results
+        mean_values.append((mean_x, mean_y))
+        standard_errors.append((se_x, se_y))
+
+    return mean_values, standard_errors
 
 
 
@@ -106,33 +499,33 @@ def split_date(dt=None):
 
 
 
-def split_datetime(start=None, end=None):
+# def split_datetime(start=None, end=None):
     
-    START_DATE, START_TIME = start.split('T')
-    END_DATE, END_TIME = end.split('T')
+#     START_DATE, START_TIME = start.split('T')
+#     END_DATE, END_TIME = end.split('T')
 
-    START_YEAR, START_MONTH, START_DAY = START_DATE.split('-')
-    END_YEAR, END_MONTH, END_DAY = END_DATE.split('-')
+#     START_YEAR, START_MONTH, START_DAY = START_DATE.split('-')
+#     END_YEAR, END_MONTH, END_DAY = END_DATE.split('-')
 
-    START_HOUR, START_MINUTE, START_SECOND = START_TIME.split(':')
-    END_HOUR, END_MINUTE, END_SECOND = END_TIME.split(':')
+#     START_HOUR, START_MINUTE, START_SECOND = START_TIME.split(':')
+#     END_HOUR, END_MINUTE, END_SECOND = END_TIME.split(':')
 
-    datetime_dict = {
-        'start_year': START_YEAR,
-        'start_month': START_MONTH,
-        'start_day': START_DAY,
-        'start_hour': START_HOUR,
-        'start_minute': START_MINUTE,
-        'start_second': START_SECOND,
+#     datetime_dict = {
+#         'start_year': START_YEAR,
+#         'start_month': START_MONTH,
+#         'start_day': START_DAY,
+#         'start_hour': START_HOUR,
+#         'start_minute': START_MINUTE,
+#         'start_second': START_SECOND,
         
-        'end_year': END_YEAR,
-        'end_month': END_MONTH,
-        'end_day': END_DAY,
-        'end_hour': END_HOUR,
-        'end_minute': END_MINUTE,
-        'end_second': END_SECOND
-    }
-    return datetime_dict
+#         'end_year': END_YEAR,
+#         'end_month': END_MONTH,
+#         'end_day': END_DAY,
+#         'end_hour': END_HOUR,
+#         'end_minute': END_MINUTE,
+#         'end_second': END_SECOND
+#     }
+#     return datetime_dict
 
 
 
@@ -208,6 +601,7 @@ def load_aia(data_dir=None, start=None, end=None, level=1.5, data_type='highres'
             print(f'Append lv1.5 AIA {channel} map {i}')
             map_objects.append(m)
     return map_objects
+
 
 
 
@@ -326,28 +720,28 @@ def load_suvi(data_dir=None, start=None, end=None, channel=195):
 
 
 
-def load_lasco(data_dir=None, start=None, end=None, detector='C2'):
-    """
-    Load SOHO/LASCO C2 or C3 images as sunpy maps.
-    """
-    dt_dict = split_datetime(start=start, end=end)
-    data = sorted(glob.glob(f"{data_dir}/LASCO_{detector}/LASCO_{detector}_{dt_dict['start_year']}{dt_dict['start_month']}{dt_dict['start_day']}*.jp2"))
+# def load_lasco(data_dir=None, start=None, end=None, detector='C2'):
+#     """
+#     Load SOHO/LASCO C2 or C3 images as sunpy maps.
+#     """
+#     dt_dict = split_datetime(start=start, end=end)
+#     data = sorted(glob.glob(f"{data_dir}/LASCO_{detector}/LASCO_{detector}_{dt_dict['start_year']}{dt_dict['start_month']}{dt_dict['start_day']}*.jp2"))
     
-    start_file_to_find = f"{data_dir}/LASCO_{detector}/LASCO_{detector}_{dt_dict['end_year']}{dt_dict['start_month']}{dt_dict['start_day']}T{dt_dict['start_hour']}{dt_dict['start_minute']}.jp2"
-    end_file_to_find = f"{data_dir}/LASCO_{detector}/LASCO_{detector}_{dt_dict['end_year']}{dt_dict['end_month']}{dt_dict['end_day']}T{dt_dict['end_hour']}{dt_dict['end_minute']}.jp2"
+#     start_file_to_find = f"{data_dir}/LASCO_{detector}/LASCO_{detector}_{dt_dict['end_year']}{dt_dict['start_month']}{dt_dict['start_day']}T{dt_dict['start_hour']}{dt_dict['start_minute']}.jp2"
+#     end_file_to_find = f"{data_dir}/LASCO_{detector}/LASCO_{detector}_{dt_dict['end_year']}{dt_dict['end_month']}{dt_dict['end_day']}T{dt_dict['end_hour']}{dt_dict['end_minute']}.jp2"
     
-    idx1 = data.index(start_file_to_find)
-    idx2 = data.index(end_file_to_find)
-    chosen_files = data[idx1:idx2]
+#     idx1 = data.index(start_file_to_find)
+#     idx2 = data.index(end_file_to_find)
+#     chosen_files = data[idx1:idx2]
     
-    map_objects = []
-    for i, file in enumerate(chosen_files):
-        m = sunpy.map.Map(file)
-        m.meta['bunit'] = 'ct' # a workaround for C2 and C3 jp2 images
-        m.plot_settings['norm'] = ImageNormalize(vmin=0, vmax=250)
-        map_objects.append(m)
-        print(f'LASCO {detector} image {i} is done')
-    return map_objects
+#     map_objects = []
+#     for i, file in enumerate(chosen_files):
+#         m = sunpy.map.Map(file)
+#         m.meta['bunit'] = 'ct' # a workaround for C2 and C3 jp2 images
+#         m.plot_settings['norm'] = ImageNormalize(vmin=0, vmax=250)
+#         map_objects.append(m)
+#         print(f'LASCO {detector} image {i} is done')
+#     return map_objects
 
 
 
@@ -374,22 +768,22 @@ def remove_redundant_maps(maps):
 
 
 
-def apply_runratio(maps):
-    """
-    Apply running-ratio image technique on EUV images.
-    See: https://iopscience.iop.org/article/10.1088/0004-637X/750/2/134/pdf
-        Inputs: list of EUV sunpy maps.
-        Output: sequence of run-ratio sunpy maps.
-    """
-    runratio = [m / prev_m.quantity for m, prev_m in zip(maps[1:], maps[:-1])]
-    m_seq_runratio = sunpy.map.Map(runratio, sequence=True)
+# def apply_runratio(maps):
+#     """
+#     Apply running-ratio image technique on EUV images.
+#     See: https://iopscience.iop.org/article/10.1088/0004-637X/750/2/134/pdf
+#         Inputs: list of EUV sunpy maps.
+#         Output: sequence of run-ratio sunpy maps.
+#     """
+#     runratio = [m / prev_m.quantity for m, prev_m in zip(maps[1:], maps[:-1])]
+#     m_seq_runratio = sunpy.map.Map(runratio, sequence=True)
     
-    # for m in m_seq_runratio:
-    #     m.data[np.isnan(m.data)] = 1
-    #     m.plot_settings['norm'] = colors.Normalize(vmin=0, vmax=2)
-    #     m.plot_settings['cmap'] = 'Greys_r'
+#     # for m in m_seq_runratio:
+#     #     m.data[np.isnan(m.data)] = 1
+#     #     m.plot_settings['norm'] = colors.Normalize(vmin=0, vmax=2)
+#     #     m.plot_settings['cmap'] = 'Greys_r'
     
-    return m_seq_runratio
+#     return m_seq_runratio
 
 
 
@@ -644,51 +1038,51 @@ def fetch_PSPfields(data_dir=None, year=None, month=None, day=None, data_version
 
 
 
-def draw_bezier(x1=0, y1=0, x2=0, y2=0, control=[0,0]):
-    """
-    Draw a Bezier curve using the given control points.
-    The curve will be drawn from the point (x1, y1) to the point
-    (x2, y2) using the control points (control[0], control[1]).
-    """
-    A = np.array([x2, y2])
-    B = np.array(control)
-    C = np.array([x1, y1])
+# def draw_bezier(x1=0, y1=0, x2=0, y2=0, control=[0,0]):
+#     """
+#     Draw a Bezier curve using the given control points.
+#     The curve will be drawn from the point (x1, y1) to the point
+#     (x2, y2) using the control points (control[0], control[1]).
+#     """
+#     A = np.array([x2, y2])
+#     B = np.array(control)
+#     C = np.array([x1, y1])
 
-    A = A.reshape(2,1)
-    B = B.reshape(2,1)
-    C = C.reshape(2,1)
+#     A = A.reshape(2,1)
+#     B = B.reshape(2,1)
+#     C = C.reshape(2,1)
     
-    t = np.arange(0, 1, 0.2).reshape(1,-1)
+#     t = np.arange(0, 1, 0.2).reshape(1,-1)
     
-    # length = len(df.index)
-    # t = np.linspace(0, 1, length).reshape(1,-1)
-    # t = np.arange(0, length, 1).reshape(1,-1)
+#     # length = len(df.index)
+#     # t = np.linspace(0, 1, length).reshape(1,-1)
+#     # t = np.arange(0, length, 1).reshape(1,-1)
     
-    P0 = A * t + (1 - t) * B
-    P1 = B * t + (1 - t) * C
-    Pfinal = P0 * t + (1 - t) * P1
+#     P0 = A * t + (1 - t) * B
+#     P1 = B * t + (1 - t) * C
+#     Pfinal = P0 * t + (1 - t) * P1
 
-    return Pfinal
+#     return Pfinal
 
 
-def extract_bezier_values(array, x1, y1, x2, y2, control):
-    """
-    Extract the values of a Bezier curve at the given control points.
-    The curve will be drawn from the point (x1, y1) to the point
-    (x2, y2) using the control points (control[0], control[1])
-    """
-    Pfinal = draw_bezier(x1, y1, x2, y2, control)
-    x_coords = np.round(Pfinal[0, :]).astype(int)
-    y_coords = np.round(Pfinal[1, :]).astype(int)
+# def extract_bezier_values(array, x1, y1, x2, y2, control):
+#     """
+#     Extract the values of a Bezier curve at the given control points.
+#     The curve will be drawn from the point (x1, y1) to the point
+#     (x2, y2) using the control points (control[0], control[1])
+#     """
+#     Pfinal = draw_bezier(x1, y1, x2, y2, control)
+#     x_coords = np.round(Pfinal[0, :]).astype(int)
+#     y_coords = np.round(Pfinal[1, :]).astype(int)
 
-    # Clip the coordinates to stay within array bounds
-    x_coords = np.clip(x_coords, 0, array.shape[1] - 1)
-    y_coords = np.clip(y_coords, 0, array.shape[0] - 1)
+#     # Clip the coordinates to stay within array bounds
+#     x_coords = np.clip(x_coords, 0, array.shape[1] - 1)
+#     y_coords = np.clip(y_coords, 0, array.shape[0] - 1)
 
-    # Extract values along the Bézier curve
-    bezier_values = array[y_coords, x_coords]
+#     # Extract values along the Bézier curve
+#     bezier_values = array[y_coords, x_coords]
     
-    return bezier_values, x_coords, y_coords
+#     return bezier_values, x_coords, y_coords
 
 
 
@@ -747,6 +1141,83 @@ def compute_standard_error(values_list):
 
 
 
+def draw_bezier(x1=0, y1=0, x2=0, y2=0, controls=[[0,0]], n=2):
+    """
+    Draw a Bézier curve of degree n using control points.
+    
+    Parameters:
+    - x1, y1: Start point coordinates.
+    - x2, y2: End point coordinates.
+    - controls: A list of control points, where:
+        - 1 control point for n=2 (quadratic).
+        - 2 control points for n=3 (cubic).
+    - n: Degree of the Bézier curve (2 for quadratic, 3 for cubic).
+    
+    Returns:
+    - bezier_curve: An array of points [x, y] that form the Bézier curve.
+    """
+    if n == 2 and len(controls) != 1:
+        raise ValueError("Quadratic Bézier requires exactly 1 control point.")
+    elif n == 3 and len(controls) != 2:
+        raise ValueError("Cubic Bézier requires exactly 2 control points.")
+    
+    # Convert points to numpy arrays
+    P0 = np.array([x1, y1])  # Start point
+    P3 = np.array([x2, y2])  # End point
+    
+    # Create time steps t from 0 to 1
+    t = np.linspace(0, 1, 50)  # 100 points for smoothness
+
+    if n == 2:  # Quadratic Bézier curve
+        P1 = np.array(controls[0])  # Only 1 control point
+        
+        # Quadratic Bézier formula
+        bezier_curve = (1 - t)[:, None] ** 2 * P0 + \
+                       2 * (1 - t)[:, None] * t[:, None] * P1 + \
+                       t[:, None] ** 2 * P3
+    
+    elif n == 3:  # Cubic Bézier curve
+        if not any(np.isnan(controls[1])):
+            P1 = np.array(controls[0])  # First control point
+            P2 = np.array(controls[1])  # Second control point
+            
+            # Cubic Bézier formula
+            bezier_curve = (1 - t)[:, None] ** 3 * P0 + \
+                           3 * (1 - t)[:, None] ** 2 * t[:, None] * P1 + \
+                           3 * (1 - t)[:, None] * t[:, None] ** 2 * P2 + \
+                           t[:, None] ** 3 * P3
+        else:
+            P1 = np.array(controls[0])  # Only 1 control point
+            
+            # Quadratic Bézier formula
+            bezier_curve = (1 - t)[:, None] ** 2 * P0 + \
+                           2 * (1 - t)[:, None] * t[:, None] * P1 + \
+                           t[:, None] ** 2 * P3
+    
+    return bezier_curve
+
+
+
+def extract_bezier_values(array, x1, y1, x2, y2, controls, n):
+    """
+    Extract the values of a Bézier curve of degree n using control points.
+    The curve will be drawn from the point (x1, y1) to the point (x2, y2)
+    using the control points provided in the controls list.
+    """
+    bezier_curve = draw_bezier(x1, y1, x2, y2, controls, n)
+    
+    # Get the x and y coordinates
+    x_coords = np.round(bezier_curve[:, 0]).astype(int)
+    y_coords = np.round(bezier_curve[:, 1]).astype(int)
+
+    # Clip the coordinates to stay within array bounds
+    x_coords = np.clip(x_coords, 0, array.shape[1] - 1)
+    y_coords = np.clip(y_coords, 0, array.shape[0] - 1)
+
+    # Extract values along the Bézier curve
+    bezier_values = array[y_coords, x_coords]
+    
+    return bezier_values, x_coords, y_coords
 
 
 

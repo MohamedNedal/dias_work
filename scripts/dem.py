@@ -3,6 +3,11 @@
 
 import warnings
 warnings.simplefilter('ignore')
+warnings.filterwarnings('ignore')
+
+import os
+os.environ['OMP_NUM_THREADS'] = '4'
+
 from sys import path as sys_path
 import os.path
 import platform
@@ -34,6 +39,16 @@ from bisect import bisect_left, bisect_right
 from sunpy.time import parse_time
 
 
+single = False
+
+passband = [94, 131, 171, 193, 211, 335]
+data_dir = '/home/mnedal/data'
+os.makedirs(f'{data_dir}/tornado_files/png', exist_ok='True')
+
+# START: '2024-05-14 17:00:00.00'
+# END  : '2024-05-14 19:00:00.00'
+
+check_manually = []
 
 # Define constants and make the data directories
 # data_disk = '/home/mnedal/data/AIA/'
@@ -143,132 +158,239 @@ def make_datetime_range(start_time=None, end_time=None, cadence=None):
     
     return datetime_list
 
+# ==============================================================================================
 
-passband = [94, 131, 171, 193, 211, 335]
-data_dir = '/home/mnedal/data'
+
+
+
 
 
 # Your target date and time
-# date_time_str = '2024-05-14 17:39:00.00' # single frame
+if single:
+    date_time_str = '2024-05-14 17:58:36.00'
+    print(f'\nDoing a single frame: {date_time_str} ..\n')
 
-datetime_list = make_datetime_range(start_time='2024-05-14 17:00:00.00',
-                                    end_time='2024-05-14 19:00:00.00',
-                                    cadence=12) # range of frames
-
-for date_time_str in datetime_list:
     target_datetime = dt.datetime.strptime(f'{date_time_str}', '%Y-%m-%d %H:%M:%S.%f')
     
     farray = []
     for channel in passband:
-        files = sorted(glob.glob(f'{data_dir}/AIA/{channel}A/highres/lv15/*.fits'))
+        files         = sorted(glob.glob(f'{data_dir}/AIA/{channel}A/highres/lv15/*.fits'))
         closest_index = find_closest_filename(files, channel, target_datetime)
-        aia_file = files[closest_index]
+        aia_file      = files[closest_index]
         farray.append(aia_file)
     
     maps = Map(farray)
     
-    
     frame_folder = maps[0].meta['t_rec'][:-1].replace('-','').replace(':','')
-    err_arr_tit = f'{data_dir}/tornado_files/{frame_folder}/error_data_{frame_folder}.asdf'
-    dem_arr_tit = f'{data_dir}/tornado_files/{frame_folder}/dem_data_{frame_folder}.asdf'
+    err_arr_tit  = f'{data_dir}/tornado_files/{frame_folder}/error_data_{frame_folder}.asdf'
+    dem_arr_tit  = f'{data_dir}/tornado_files/{frame_folder}/dem_data_{frame_folder}.asdf'
     os.makedirs(f'{data_dir}/tornado_files/{frame_folder}', exist_ok='True')
-    os.makedirs(f'{data_dir}/tornado_files/png', exist_ok='True')
     
-    if os.path.exists(frame_folder):
-        if os.path.exists(err_arr_tit) and os.path.exists(dem_arr_tit):
-            print(f'{frame_folder} exists and processed already.')
-            pass
+    print(f'\n====================\nProcessing {frame_folder} ...\n====================\n')
+    top_right   = SkyCoord(-840*u.arcsec, 420*u.arcsec, frame=maps[0].coordinate_frame)
+    bottom_left = SkyCoord(-920*u.arcsec, 300*u.arcsec, frame=maps[0].coordinate_frame)
+    submap_0    = maps[0].submap(bottom_left, top_right=top_right)
+    nx, ny      = submap_0.data.shape
+    nf          = len(maps)
+    map_arr     = []
+    err_array = np.zeros([nx, ny, nf])
+    
+    for i, m in enumerate(maps):
+        # crop the region of interest
+        top_right   = SkyCoord(-840*u.arcsec, 420*u.arcsec, frame=m.coordinate_frame)
+        bottom_left = SkyCoord(-920*u.arcsec, 300*u.arcsec, frame=m.coordinate_frame)
+        submap      = m.submap(bottom_left, top_right=top_right)
+        map_arr.append(submap)
+        
+        num_pix = submap.data.size
+        err_array[:,:,i] = estimate_error(submap.data*(u.ct/u.pix), submap.wavelength, n_samples=num_pix)
+    
+    map_array = Map(map_arr[0], map_arr[1], map_arr[2],
+                    map_arr[3], map_arr[4], map_arr[5],
+                    sequence=True, sortby=None)
+    
+    map_arr_tit = data_dir + '/tornado_files/' + frame_folder + '/prepped_data_{index:03}.fits'
+    map_array.save(map_arr_tit, overwrite='True')
+    
+    tree = {'err_array': err_array}
+    with asdf.AsdfFile(tree) as asdf_file:
+        asdf_file.write_to(err_arr_tit, all_array_compression='zlib')
+    
+    # # export prepped maps as asdf file
+    # files = sorted(glob.glob(f'{data_dir}/tornado_files/*.fits'))
+    # tree = {}
+    # for i, file in enumerate(files):
+    #     tree[f'image_array_{i}'] = Map(file)
+    # with asdf.AsdfFile(tree) as asdf_file:
+    #     asdf_file.write_to(f'{data_dir}/tornado_files/image_arrays_{frame_folder}.asdf', all_array_compression='zlib')
+    
+    print('Calculating DEM ...')
+    dem, edem, elogt, chisq, dn_reg, mlogt, logtemps = calculate_dem(map_array, err_array)
+    
+    tree = {'dem':dem, 'edem':edem, 'mlogt':mlogt, 'elogt':elogt, 'chisq':chisq, 'logtemps':logtemps}
+    with asdf.AsdfFile(tree) as asdf_file:
+        asdf_file.write_to(dem_arr_tit, all_array_compression='zlib')
+    
+    # Get a submap to have the scales and image properties
+    nt     = len(dem[0,0,:])
+    nt_new = int(nt/2)
+    nc, nr = 3, 3
+    plt.rcParams.update({'font.size':12, 'font.family':"DejaVu Sans",\
+                         'font.sans-serif':"DejaVu Sans", 'mathtext.default':"regular"})
+    
+    fig, axes = plt.subplots(nrows=nr, ncols=nc, figsize=[12,12], sharex=True, sharey=True, subplot_kw=dict(projection=submap), layout='constrained')
+    plt.suptitle('Image time: '+dt.datetime.strftime(submap.date.datetime, "%Y-%m-%d %H:%M:%S"))
+    fig.supxlabel('Solar X (arcsec)', y=0.015)
+    fig.supylabel('Solar Y (arcsec)', x=0.1)
+    cmap = plt.cm.get_cmap('cubehelix_r')
+    
+    for i, axi in enumerate(axes.flat):
+        new_dem = (dem[:,:,i*2]+dem[:,:,i*2+1])/2.
+        plotmap = Map(new_dem, submap.meta)
+        plotmap.plot(axes=axi,
+                     norm=colors.LogNorm(vmin=1e18, vmax=1e24),
+                     cmap='RdYlBu_r')
+        axi.grid(False)
+        
+        y = axi.coords[1]
+        y.set_axislabel(' ')
+        if i == 1 or i == 2 or i == 4 or i == 5 or i == 7 or i == 8:
+            y.set_ticklabel_visible(False)
+        x = axi.coords[0]
+        x.set_axislabel(' ')
+        if i < 6:
+            x.set_ticklabel_visible(False)
+    
+        axi.set_title(f'Log(T) = {logtemps[i*2]:.2f} - {logtemps[i*2+1+1]:.2f}')
+    
+    fig.tight_layout(pad=0.1, rect=[0, 0, 1, 0.98])
+    plt.colorbar(ax=axes.ravel().tolist(), label='$\mathrm{DEM\;[cm^{-5}\;K^{-1}]}$', 
+                 aspect=40, pad=0.02)
+    fig.savefig(f'{data_dir}/tornado_files/png/dem_tornado_{frame_folder}.png', format='png', dpi=300, bbox_inches='tight')
+    fig.savefig(f'{data_dir}/tornado_files/{frame_folder}/dem_tornado_{frame_folder}.pdf', format='pdf', bbox_inches='tight')
+    plt.close()
+
+
+
+
+else:
+    datetime_list = make_datetime_range(start_time='2024-05-14 17:00:00.00',
+                                        end_time='2024-05-14 19:00:00.00',
+                                        cadence=12) # range of frames
+    
+    for date_time_str in datetime_list:
+        target_datetime = dt.datetime.strptime(f'{date_time_str}', '%Y-%m-%d %H:%M:%S.%f')
+        
+        farray = []
+        for channel in passband:
+            files         = sorted(glob.glob(f'{data_dir}/AIA/{channel}A/highres/lv15/*.fits'))
+            closest_index = find_closest_filename(files, channel, target_datetime)
+            aia_file      = files[closest_index]
+            farray.append(aia_file)
+        
+        maps = Map(farray)
+        
+        frame_folder = maps[0].meta['t_rec'][:-1].replace('-','').replace(':','')
+        err_arr_tit  = f'{data_dir}/tornado_files/{frame_folder}/error_data_{frame_folder}.asdf'
+        dem_arr_tit  = f'{data_dir}/tornado_files/{frame_folder}/dem_data_{frame_folder}.asdf'
+        
+        if os.path.exists(f'{data_dir}/tornado_files/{frame_folder}'):
+            if os.path.exists(err_arr_tit) and os.path.exists(dem_arr_tit):
+                print(f'{frame_folder} exists and processed already.')
+                pass
+            else:
+                print(f'DEM file is missing from {frame_folder} !')
+                print('Process it manually.')
+                check_manually.append(date_time_str)
         else:
-            print(f'DEM file is missing from {frame_folder} !')
-    else:
-        print(f'\n====================\nProcessing {frame_folder} ...\n====================\n')
-        top_right   = SkyCoord(-840*u.arcsec, 420*u.arcsec, frame=maps[0].coordinate_frame)
-        bottom_left = SkyCoord(-920*u.arcsec, 300*u.arcsec, frame=maps[0].coordinate_frame)
-        submap_0    = maps[0].submap(bottom_left, top_right=top_right)
-        nx, ny      = submap_0.data.shape
-        nf          = len(maps)
-        map_arr     = []
-        err_array = np.zeros([nx, ny, nf])
-        
-        for i, m in enumerate(maps):
-            # crop the region of interest
-            top_right   = SkyCoord(-840*u.arcsec, 420*u.arcsec, frame=m.coordinate_frame)
-            bottom_left = SkyCoord(-920*u.arcsec, 300*u.arcsec, frame=m.coordinate_frame)
-            submap      = m.submap(bottom_left, top_right=top_right)
-            map_arr.append(submap)
+            os.makedirs(f'{data_dir}/tornado_files/{frame_folder}', exist_ok='True')
             
-            num_pix = submap.data.size
-            err_array[:,:,i] = estimate_error(submap.data*(u.ct/u.pix), submap.wavelength, n_samples=num_pix)
-        
-        map_array = Map(map_arr[0], map_arr[1], map_arr[2],
-                        map_arr[3], map_arr[4], map_arr[5],
-                        sequence=True, sortby=None)
-        
-        
-        map_arr_tit = data_dir + '/tornado_files/' + frame_folder + '/prepped_data_{index:03}.fits'
-        map_array.save(map_arr_tit, overwrite='True')
-        
-        tree = {'err_array': err_array}
-        with asdf.AsdfFile(tree) as asdf_file:
-            asdf_file.write_to(err_arr_tit, all_array_compression='zlib')
-        
-        # # export prepped maps as asdf file
-        # files = sorted(glob.glob(f'{data_dir}/tornado_files/*.fits'))
-        # tree = {}
-        # for i, file in enumerate(files):
-        #     tree[f'image_array_{i}'] = Map(file)
-        # with asdf.AsdfFile(tree) as asdf_file:
-        #     asdf_file.write_to(f'{data_dir}/tornado_files/image_arrays_{frame_folder}.asdf', all_array_compression='zlib')
-        
-        print('Calculating DEM ...')
-        dem, edem, elogt, chisq, dn_reg, mlogt, logtemps = calculate_dem(map_array, err_array)
-        
-        tree = {'dem':dem, 'edem':edem, 'mlogt':mlogt, 'elogt':elogt, 'chisq':chisq, 'logtemps':logtemps}
-        with asdf.AsdfFile(tree) as asdf_file:
-            asdf_file.write_to(dem_arr_tit, all_array_compression='zlib')
-        
-        
-        
-        # Get a submap to have the scales and image properties
-        nt     = len(dem[0,0,:])
-        nt_new = int(nt/2)
-        nc, nr = 3, 3
-        plt.rcParams.update({'font.size':12, 'font.family':"DejaVu Sans",\
-                             'font.sans-serif':"DejaVu Sans", 'mathtext.default':"regular"})
-        
-        fig, axes = plt.subplots(nrows=nr, ncols=nc, figsize=[12,12], sharex=True, sharey=True, subplot_kw=dict(projection=submap), layout='constrained')
-        plt.suptitle('Image time: '+dt.datetime.strftime(submap.date.datetime, "%Y-%m-%d %H:%M:%S"))
-        fig.supxlabel('Solar X (arcsec)', y=0.015)
-        fig.supylabel('Solar Y (arcsec)', x=0.1)
-        cmap = plt.cm.get_cmap('cubehelix_r')
-        
-        for i, axi in enumerate(axes.flat):
-            new_dem = (dem[:,:,i*2]+dem[:,:,i*2+1])/2.
-            plotmap = Map(new_dem, submap.meta)
-            plotmap.plot(axes=axi,
-                         norm=colors.LogNorm(vmin=1e18, vmax=1e24),
-                         cmap='RdYlBu_r')
-            axi.grid(False)
+            print(f'\n====================\nProcessing {frame_folder} ...\n====================\n')
+            top_right   = SkyCoord(-840*u.arcsec, 420*u.arcsec, frame=maps[0].coordinate_frame)
+            bottom_left = SkyCoord(-920*u.arcsec, 300*u.arcsec, frame=maps[0].coordinate_frame)
+            submap_0    = maps[0].submap(bottom_left, top_right=top_right)
+            nx, ny      = submap_0.data.shape
+            nf          = len(maps)
+            map_arr     = []
+            err_array = np.zeros([nx, ny, nf])
             
-            y = axi.coords[1]
-            y.set_axislabel(' ')
-            if i == 1 or i == 2 or i == 4 or i == 5 or i == 7 or i == 8:
-                y.set_ticklabel_visible(False)
-            x = axi.coords[0]
-            x.set_axislabel(' ')
-            if i < 6:
-                x.set_ticklabel_visible(False)
-        
-            axi.set_title(f'Log(T) = {logtemps[i*2]:.2f} - {logtemps[i*2+1+1]:.2f}')
-        
-        fig.tight_layout(pad=0.1, rect=[0, 0, 1, 0.98])
-        plt.colorbar(ax=axes.ravel().tolist(), label='$\mathrm{DEM\;[cm^{-5}\;K^{-1}]}$', 
-                     aspect=40, pad=0.02)
-        fig.savefig(f'{data_dir}/tornado_files/png/dem_tornado_{frame_folder}.png', format='png', dpi=300, bbox_inches='tight')
-        fig.savefig(f'{data_dir}/tornado_files/{frame_folder}/dem_tornado_{frame_folder}.pdf', format='pdf', bbox_inches='tight')
-        plt.close()
-
-
+            for i, m in enumerate(maps):
+                # crop the region of interest
+                top_right   = SkyCoord(-840*u.arcsec, 420*u.arcsec, frame=m.coordinate_frame)
+                bottom_left = SkyCoord(-920*u.arcsec, 300*u.arcsec, frame=m.coordinate_frame)
+                submap      = m.submap(bottom_left, top_right=top_right)
+                map_arr.append(submap)
+                
+                num_pix = submap.data.size
+                err_array[:,:,i] = estimate_error(submap.data*(u.ct/u.pix), submap.wavelength, n_samples=num_pix)
+            
+            map_array = Map(map_arr[0], map_arr[1], map_arr[2],
+                            map_arr[3], map_arr[4], map_arr[5],
+                            sequence=True, sortby=None)
+            
+            map_arr_tit = data_dir + '/tornado_files/' + frame_folder + '/prepped_data_{index:03}.fits'
+            map_array.save(map_arr_tit, overwrite='True')
+            
+            tree = {'err_array': err_array}
+            with asdf.AsdfFile(tree) as asdf_file:
+                asdf_file.write_to(err_arr_tit, all_array_compression='zlib')
+            
+            # # export prepped maps as asdf file
+            # files = sorted(glob.glob(f'{data_dir}/tornado_files/*.fits'))
+            # tree = {}
+            # for i, file in enumerate(files):
+            #     tree[f'image_array_{i}'] = Map(file)
+            # with asdf.AsdfFile(tree) as asdf_file:
+            #     asdf_file.write_to(f'{data_dir}/tornado_files/image_arrays_{frame_folder}.asdf', all_array_compression='zlib')
+            
+            print('Calculating DEM ...')
+            dem, edem, elogt, chisq, dn_reg, mlogt, logtemps = calculate_dem(map_array, err_array)
+            
+            tree = {'dem':dem, 'edem':edem, 'mlogt':mlogt, 'elogt':elogt, 'chisq':chisq, 'logtemps':logtemps}
+            with asdf.AsdfFile(tree) as asdf_file:
+                asdf_file.write_to(dem_arr_tit, all_array_compression='zlib')
+            
+            # Get a submap to have the scales and image properties
+            nt     = len(dem[0,0,:])
+            nt_new = int(nt/2)
+            nc, nr = 3, 3
+            plt.rcParams.update({'font.size':12, 'font.family':"DejaVu Sans",\
+                                 'font.sans-serif':"DejaVu Sans", 'mathtext.default':"regular"})
+            
+            fig, axes = plt.subplots(nrows=nr, ncols=nc, figsize=[12,12], sharex=True, sharey=True, subplot_kw=dict(projection=submap), layout='constrained')
+            plt.suptitle('Image time: '+dt.datetime.strftime(submap.date.datetime, "%Y-%m-%d %H:%M:%S"))
+            fig.supxlabel('Solar X (arcsec)', y=0.015)
+            fig.supylabel('Solar Y (arcsec)', x=0.1)
+            cmap = plt.cm.get_cmap('cubehelix_r')
+            
+            for i, axi in enumerate(axes.flat):
+                new_dem = (dem[:,:,i*2]+dem[:,:,i*2+1])/2.
+                plotmap = Map(new_dem, submap.meta)
+                plotmap.plot(axes=axi,
+                             norm=colors.LogNorm(vmin=1e18, vmax=1e24),
+                             cmap='RdYlBu_r')
+                axi.grid(False)
+                
+                y = axi.coords[1]
+                y.set_axislabel(' ')
+                if i == 1 or i == 2 or i == 4 or i == 5 or i == 7 or i == 8:
+                    y.set_ticklabel_visible(False)
+                x = axi.coords[0]
+                x.set_axislabel(' ')
+                if i < 6:
+                    x.set_ticklabel_visible(False)
+            
+                axi.set_title(f'Log(T) = {logtemps[i*2]:.2f} - {logtemps[i*2+1+1]:.2f}')
+            
+            fig.tight_layout(pad=0.1, rect=[0, 0, 1, 0.98])
+            plt.colorbar(ax=axes.ravel().tolist(), label='$\mathrm{DEM\;[cm^{-5}\;K^{-1}]}$', 
+                         aspect=40, pad=0.02)
+            fig.savefig(f'{data_dir}/tornado_files/png/dem_tornado_{frame_folder}.png', format='png', dpi=300, bbox_inches='tight')
+            fig.savefig(f'{data_dir}/tornado_files/{frame_folder}/dem_tornado_{frame_folder}.pdf', format='pdf', bbox_inches='tight')
+            plt.close()
+    
+    print('\n\nCheck the following folders manually:')
+    print(check_manually)
 
 
 

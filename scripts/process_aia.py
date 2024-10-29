@@ -17,11 +17,12 @@ from tqdm import tqdm
 data_dir = '/home/mnedal/data'
 # passbands = [94, 131, 171, 193, 211, 335]
 # nf = len(passbands)
+channel = 335
+single_frame = False
+# target_datetime = '2024-05-14 17:36:05.0' # Your target date and time
 
-channel = 171
-date_time_str = '2024-05-14 17:36:05.0' # Your target date and time
-
-target_datetime = datetime.strptime(f'{date_time_str}', '%Y-%m-%d %H:%M:%S.%f')
+# start_time = ...
+# end_time   = ...
 
 os.makedirs(f'{data_dir}/AIA/{channel}A/highres/lv1', exist_ok=True)
 os.makedirs(f'{data_dir}/AIA/{channel}A/highres/lv15', exist_ok=True)
@@ -53,6 +54,8 @@ def find_closest_filename(filenames, target_datetime):
     
     for i, filename in enumerate(filenames):
         file_datetime = extract_datetime(filename)
+        # print(type(file_datetime))
+        # print(type(target_datetime))
         
         # Calculate the absolute time difference
         time_diff = abs(file_datetime - target_datetime)
@@ -65,40 +68,99 @@ def find_closest_filename(filenames, target_datetime):
     return closest_index
 
 
+def extract_datetime_v1(filename):
+    import re
+    # Regular expression to capture the date-time part of the filename
+    pattern = r'_(\d{4}_\d{2}_\d{2}T\d{2}_\d{2}_\d{2}\.\d{2})Z'
+    
+    # Search the filename for the pattern
+    match = re.search(pattern, filename)
+    
+    if match:
+        # Replace underscores with colons and hyphens to format as a standard date-time string
+        datetime_str = match.group(1).replace('_', '-', 2).replace('_', ':').replace('T', ' ')
+        return datetime_str
+    else:
+        return []  # Return empty list if no match found
 
 
+def do_process(date_time_str):
+    target_datetime = datetime.strptime(f'{date_time_str}', '%Y-%m-%d %H:%M:%S.%f')
+    
+    # find the file index with the nearest datetime to the given one above
+    files = sorted(glob.glob(f'{data_dir}/AIA/{channel}A/highres/lv1/*.fits'))
+    
+    closest_index = find_closest_filename(files, target_datetime)
+    
+    print(f'\nclosest index to the given date: {closest_index}\n')
+    
+    # load the file as a sunpy map
+    aia_file = files[closest_index]
+    
+    output_filename = f'{data_dir}/AIA/{channel}A/highres/lv15/{aia_file.split("/")[-1].replace("lev1", "lev15")}'
+    if os.path.exists(output_filename):
+        print(f'{output_filename} exists and processed already.')
+        pass
+    else:
+        m = Map(aia_file)
+        print(f'Upgrade AIA {channel}A {aia_file.split("/")[-1]} map to lv1.5 and deconvolve with PSF ..\n')
+        
+        # # crop the region of interest
+        # top_right   = SkyCoord(-840*u.arcsec, 420*u.arcsec, frame=m.coordinate_frame)
+        # bottom_left = SkyCoord(-920*u.arcsec, 300*u.arcsec, frame=m.coordinate_frame)
+        # submap      = m.submap(bottom_left, top_right=top_right)
+        # print(f'submap shape: {submap.data.shape}')
+        
+        psf                      = aiapy.psf.psf(m.wavelength)
+        aia_map_deconvolved      = aiapy.psf.deconvolve(m, psf=psf)
+        print('Deconvolution is finished')
+        aia_map_updated_pointing = update_pointing(aia_map_deconvolved)
+        print('Updating pointing is finished')
+        aia_map_registered       = register(aia_map_updated_pointing)
+        print('Registration is finished')
+        aia_map_corrected        = correct_degradation(aia_map_registered)
+        print('Degradation correction is finished')
+        aia_map_norm             = aia_map_corrected / aia_map_corrected.exposure_time
+        print('Exposure time correction is finished')
+        
+        aia_map_norm.save(output_filename, filetype='auto', overwrite=True) # overwrite bc I already have lv1.5 but without PSF deconvolve.
+        
+        print('Images prepared and exporeted with the region of interest selected')
 
-# find the file index with the nearest datetime to the given one above
-files = sorted(glob.glob(f'{data_dir}/AIA/{channel}A/highres/lv1/*.fits'))
-closest_index = find_closest_filename(files, target_datetime)
-print(f'\nclosest index to the given date: {closest_index}\n')
+# ====================================================================================================
+# START FROM HERE ...
+# ====================================================================================================
 
-aia_file = files[closest_index]
+# datetime_list = []
+# if single_frame:
+#     datetime_list.append(target_datetime) 
+# else:
+#     files = sorted(glob.glob(f'{data_dir}/AIA/{channel}A/highres/lv1/*.fits'))
+#     for file in files:
+#         filename = file.split('/')[-1]
+#         datetime_list.append(extract_datetime(filename))
 
-# load the file as a sunpy map
-m = Map(aia_file)
+# if len(datetime_list) == 1:
+#     date_time_str = datetime_list[0]
+# else:
+#     for date_time_str in datetime_list:
+#         print(f'Doing frame {date_time_str} now ..')
+#         do_process(date_time_str)
 
-print(f'Upgrade AIA {channel}A {aia_file.split("/")[-1]} map to lv1.5 and deconvolve with PSF ..\n')
+datetime_list = []
+if single_frame:
+    datetime_list.append(target_datetime) 
+else:
+    files = sorted(glob.glob(f'{data_dir}/AIA/{channel}A/highres/lv1/*.fits'))
+    for file in files:
+        filename = file.split('/')[-1]
+        datetime_list.append(extract_datetime_v1(filename))
 
-# # crop the region of interest
-# top_right   = SkyCoord(-840*u.arcsec, 420*u.arcsec, frame=m.coordinate_frame)
-# bottom_left = SkyCoord(-920*u.arcsec, 300*u.arcsec, frame=m.coordinate_frame)
-# submap      = m.submap(bottom_left, top_right=top_right)
-# print(f'submap shape: {submap.data.shape}')
+if len(datetime_list) == 1:
+    date_time_str = datetime_list[0]
+else:
+    for date_time_str in datetime_list:
+        print(f'Doing frame {date_time_str} now ..')
+        do_process(date_time_str)
 
-psf                      = aiapy.psf.psf(m.wavelength)
-aia_map_deconvolved      = aiapy.psf.deconvolve(m, psf=psf)
-print('Deconvolution is finished')
-aia_map_updated_pointing = update_pointing(aia_map_deconvolved)
-print('Updating pointing is finished')
-aia_map_registered       = register(aia_map_updated_pointing)
-print('Registration is finished')
-aia_map_corrected        = correct_degradation(aia_map_registered)
-print('Degradation correction is finished')
-aia_map_norm             = aia_map_corrected / aia_map_corrected.exposure_time
-print('Exposure time correction is finished')
 
-output_filename = f'{data_dir}/AIA/{channel}A/highres/lv15/{aia_file.split("/")[-1].replace("lev1", "lev15")}'
-aia_map_norm.save(output_filename, filetype='auto', overwrite=True)
-
-print('Images prepared and exporeted with the region of interest selected')
