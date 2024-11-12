@@ -24,9 +24,9 @@ print(len(zero_sunspot_days))
 
 
 for t in zero_sunspot_days['date']:
-    YEAR = t.date().year
+    YEAR  = t.date().year
     MONTH = t.date().month
-    DAY = t.date().day
+    DAY   = t.date().day
 
     if DAY < 9:
         DAY = f'0{DAY}'

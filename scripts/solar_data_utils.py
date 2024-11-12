@@ -69,7 +69,7 @@ def get_colors(n):
     """
     Generate a list of (n) hex gradiant colors.
     """
-    cmap = plt.get_cmap('rainbow')
+    cmap   = plt.get_cmap('rainbow')
     colors = [cmap(i) for i in np.linspace(0, 1, n)]
     hex_colors = [mcolors.to_hex(c) for c in colors]
     hex_colors[0]  = '#0000ff' # set first color to blue
@@ -106,13 +106,13 @@ def draw_fullSun():
 
 def split_datetime(start=None, end=None):
     START_DATE, START_TIME = start.split('T')
-    END_DATE, END_TIME = end.split('T')
+    END_DATE, END_TIME     = end.split('T')
 
     START_YEAR, START_MONTH, START_DAY = START_DATE.split('-')
-    END_YEAR, END_MONTH, END_DAY = END_DATE.split('-')
+    END_YEAR, END_MONTH, END_DAY       = END_DATE.split('-')
 
     START_HOUR, START_MINUTE, START_SECOND = START_TIME.split(':')
-    END_HOUR, END_MINUTE, END_SECOND = END_TIME.split(':')
+    END_HOUR, END_MINUTE, END_SECOND       = END_TIME.split(':')
 
     datetime_dict = {
         'start_year': START_YEAR,
