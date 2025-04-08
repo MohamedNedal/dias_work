@@ -137,7 +137,7 @@ def split_datetime(start=None, end=None):
 
 
 
-def plot_line(angle_deg=None, length=None, map_obj=None):
+def plot_line(angle_deg=None, length=None, start_point=0, end_point=0, map_obj=None):
     """
     Plot a straight line at an angle in degrees from the solar West.
     """
@@ -147,7 +147,7 @@ def plot_line(angle_deg=None, length=None, map_obj=None):
     line_length = length * u.arcsec
     
     # Define the center point of the line (e.g., the center of the Sun)
-    center = SkyCoord(0*u.arcsec, 0*u.arcsec, frame=map_obj.coordinate_frame)
+    center = SkyCoord(start_point*u.arcsec, end_point*u.arcsec, frame=map_obj.coordinate_frame)
     
     # Calculate the start and end points of the line
     start_point = SkyCoord(center.Tx, center.Ty, frame=map_obj.coordinate_frame)
@@ -157,6 +157,30 @@ def plot_line(angle_deg=None, length=None, map_obj=None):
     
     line = SkyCoord([start_point, end_point])
     return line
+
+
+
+
+def lateral_slits(map_obj=None, central_angle=160, slit_length=500, shift_x=None, shift_y=None):
+    """
+    Define two lateral slits perpendicular to a given slit.
+    """
+    perpendicular_angle = central_angle - 90
+    
+    # Compute lateral slit start and end points (starting at main slit)
+    start_x = shift_x
+    start_y = shift_y
+    end_x1  = start_x + slit_length * np.cos(np.deg2rad(perpendicular_angle))
+    end_y1  = start_y + slit_length * np.sin(np.deg2rad(perpendicular_angle))
+    end_x2  = start_x - slit_length * np.cos(np.deg2rad(perpendicular_angle))
+    end_y2  = start_y - slit_length * np.sin(np.deg2rad(perpendicular_angle))
+    
+    # Convert to SkyCoord
+    upper_flank = SkyCoord([start_x, end_x1]*u.arcsec, [start_y, end_y1]*u.arcsec, frame=map_obj.coordinate_frame)
+    lower_flank = SkyCoord([start_x, end_x2]*u.arcsec, [start_y, end_y2]*u.arcsec, frame=map_obj.coordinate_frame)
+    
+    return (upper_flank, lower_flank)
+
 
 
 
