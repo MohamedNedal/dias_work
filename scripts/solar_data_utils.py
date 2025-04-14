@@ -438,8 +438,8 @@ def compute_standard_error(coords_dict):
     # Loop over each point position
     for point_idx in range(num_points):
         # Extract x and y values for this point across all trials
-        x_values = [trials[trial_idx][point_idx][0] for trial_idx in range(len(trials))]
-        y_values = [trials[trial_idx][point_idx][1] for trial_idx in range(len(trials))]
+        x_values = [trials[trial_idx][point_idx][0] for trial_idx in range(num_points)]
+        y_values = [trials[trial_idx][point_idx][1] for trial_idx in range(num_points)]
 
         # Convert to numpy arrays
         x_values = np.array(x_values)
@@ -448,8 +448,8 @@ def compute_standard_error(coords_dict):
         # Compute mean and standard error for this point
         mean_x = np.mean(x_values)
         mean_y = np.mean(y_values)
-        se_x = np.std(x_values, ddof=1) / np.sqrt(len(x_values))
-        se_y = np.std(y_values, ddof=1) / np.sqrt(len(y_values))
+        se_x = np.std(x_values, ddof=1) / np.sqrt(num_points)
+        se_y = np.std(y_values, ddof=1) / np.sqrt(num_points)
 
         # Store results
         mean_values.append((mean_x, mean_y))
@@ -1178,11 +1178,11 @@ def generate_number_list(center, offset, count):
 
 
 
-def compute_standard_error(values_list):
-    values_array = np.array(values_list)
-    mean_values = np.mean(values_array, axis=0)
-    standard_error = np.std(values_array, axis=0, ddof=1) / np.sqrt(values_array.shape[0])
-    return mean_values, standard_error
+# def compute_standard_error(values_list):
+#     values_array = np.array(values_list)
+#     mean_values = np.mean(values_array, axis=0)
+#     standard_error = np.std(values_array, axis=0, ddof=1) / np.sqrt(values_array.shape[0])
+#     return mean_values, standard_error
 
 
 
