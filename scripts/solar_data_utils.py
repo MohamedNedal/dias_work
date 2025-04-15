@@ -5,6 +5,7 @@ import glob
 seed_val = 7
 import os
 os.environ['PYTHONHASHSEED'] = str(seed_val)
+from scipy.io import readsav
 import random
 random.seed(seed_val)
 import numpy as np
@@ -1273,7 +1274,96 @@ def extract_bezier_values(array, x1, y1, x2, y2, controls, n):
 
 
 
+def get_forward_map(forward_imagefile, bottom_left=None, top_right=None):
+    """
+    ========================================================================================
+    Function returns a Helioprojective Map from FORWARD outputs.
+    Kamen Kozarev, based on code written by Laura Hayes.
+    ========================================================================================
+    How to create a `~sunpy.map.Map` in Helioprojective Coordinate Frame from FORWARD model.
+    In this example we read the data and header information from the FORWARD SAV file and then create 
+    a new header with updated WCS information to create a `~sunpy.map.Map` with a HPC coordinate frame. 
+    We will make use of the `astropy.coordinates` and `sunpy.coordinates` submodules together with 
+    `~sunpy.map.make_fitswcs_header` to create a new header and generate a `~sunpy.map.Map`.
+    """
+    ##############################################################################
+    # We will first begin be reading in the header and data from the SAV file.
+    hdul = readsav(forward_imagefile)
+    
+    #####################################################################################
+    # The data in this file is in a datacube structure
+    data = np.array(hdul['quantmap'].DATA[0])
+    ###############################################################################
+    # Lets pull out the observation time and quantity, we will use
+    # these to create our new header.
+    # Now we need to get the other parameters from the header that will be used
+    # to create the new header - here we can get the cdelt1 and cdelt2 which are
+    # the spatial scales of the data axes.
 
+    pxrsun = hdul['quantmap'][0][4]
+    # obstime = str(hdul['quantmap'][0][5]).split('\'')[1] + 'T12:00:00'
+    obstime = str(hdul['quantmap'][0][5]).split('\'')[1]
+    quantity = str(hdul['quantmap'][0][6]).split('!')[0].split('\'')[1]
+    try:
+        units = str(hdul['quantmap'][0][12]).split('\'')[1]
+    except:
+        units = ''
+    rsunasec = 950.
+    asecpx = rsunasec * pxrsun
+    cdelt1 = asecpx
+    cdelt2 = asecpx
+    naxis1 = hdul['gridinputs'][0][22]
+    naxis2 = hdul['gridinputs'][0][24]
+    crpix1 = int(naxis1/2)
+    if type(naxis2) == bytes:
+        if naxis2.decode('utf-8') == 'NULL':
+            crpix2 = ''
+        else:
+            crpix2 = int(naxis2.decode('utf-8')/2)
+    else:
+        crpix2 = int(naxis2/2)
+    crval1 = 0
+    crval2 = 0
+    
+    ###############################################################################
+    # To create a new `~sunpy.map.Map` header we need convert the reference coordinate
+    # to Helioprojective. To do this we will first create
+    # an `astropy.coordinates.SkyCoord` of the reference coordinate from the header information.
+    # We will need the location of the observer (i.e. where the observation was taken).
+    reference_coord = SkyCoord(crval1*u.arcsec, crval2*u.arcsec, frame='helioprojective', obstime=obstime)
+    ##########################################################################
+    
+    ##########################################################################
+    # Now we can use this information to create a new header using the helper
+    # function `~sunpy.map.make_fitswcs_header()`. This will create a MetaDict
+    # which we contain all the necessay WCS information to create a `~sunpy.map.Map`.
+    new_header = sunpy.map.make_fitswcs_header(data,
+                                               reference_coord,
+                                               reference_pixel=u.Quantity([crpix1, crpix1]*u.pixel),
+                                               scale=u.Quantity([cdelt1, cdelt2]*u.arcsec/u.pix),
+                                               rotation_angle=0*u.degree,
+                                               observatory='PSIMAS/FORWARD',
+                                               instrument=quantity)
+    ##########################################################################
+    # Lets create a `~sunpy.map.Map`.
+    forward_map = sunpy.map.Map(data, new_header)
+    ##########################################################################
+    ##########################################################################
+    # We can now rotate the image so that solar north is pointing up and create
+    # a submap in the field of view of interest.
+    forward_map_rotate = forward_map.rotate()
+    
+    if bottom_left is not None:
+        bl = SkyCoord(bottom_left[0]*u.arcsec, bottom_left[1]*u.arcsec, frame=forward_map_rotate.coordinate_frame)
+    if top_right is not None:
+        tr = SkyCoord(top_right[0]*u.arcsec, top_right[1]*u.arcsec, frame=forward_map_rotate.coordinate_frame)
+    if bottom_left and top_right:
+        forward_submap = forward_map_rotate.submap(bl, top_right=tr)
+    else:
+        forward_submap = forward_map_rotate
+    ##########################################################################
+    
+    return forward_submap
 
 
 
