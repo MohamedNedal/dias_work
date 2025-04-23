@@ -21,6 +21,7 @@ from spacepy import pycdf
 from scipy.ndimage import gaussian_filter
 from astropy.visualization import ImageNormalize, PercentileInterval
 from sunpy import timeseries as ts
+import sunpy.sun.constants as const
 import matplotlib.dates as mdates
 from PIL import Image
 from astropy.coordinates import SkyCoord
@@ -37,6 +38,64 @@ data_dir = '/home/mnedal/data'
 
 
 
+
+
+
+
+
+
+from scipy.optimize import curve_fit
+
+def kinematic_model(t, s0, v0, a):
+    """
+    Define the kinematics model (position as a function of time).
+    Add guess 
+    """
+    return s0 + v0*t + 0.5*a*t**2
+
+
+def fit_kinematics(time, distance, d1=1, d2=30):
+    """
+    Fit data and extract kinematic parameters.
+    d1: initial distance guess (e.g., 1 Rsun).
+    d2: last distance guess (e.g., 30 Rsun).
+    """
+    # initial distance
+    s0 = d1*const.radius.to('Mm').value # 4 Rsun
+    s0_bounds = [const.radius.to('Mm').value, d2*const.radius.to('Mm').value] # e.g., 1 Rsun to 30 Rsun (max FOV of LASCO C3)
+    # initial velocity, values given in km/s and converted to Mm/s
+    v0 = 1000/1e3
+    v0_bounds = [100/1e3, 2000/1e3]
+    # acceleration, values given in m/s2 and converted to Mm/s2
+    a = 500/1e6
+    a_bounds = [-1000/1e6, 1000/1e6]
+    # first guess
+    init_param = [s0, v0, a]
+    
+    # Fit the model to the data
+    params, pcov = curve_fit(kinematic_model, time, distance, p0=init_param,
+                             bounds=((s0_bounds[0], v0_bounds[0], a_bounds[0]), # min constrains
+                                     (s0_bounds[1], v0_bounds[1], a_bounds[1])) # max constrains
+                            )
+    s0, v0, a = params
+    perr = np.sqrt(np.diag(pcov))
+    init_pos_err, init_vel_err, a_err = perr
+    
+    # Calculate fitted distance, velocity, and acceleration
+    fitted_distance = kinematic_model(time, s0, v0, a)
+    velocity = v0 + a*time  # Instantaneous velocity (at each time point) over time
+    acceleration = np.full_like(time, a)  # Constant acceleration
+
+    # Compute velocity error propagation
+    velocity_err = np.sqrt(init_vel_err**2 + (time * a_err)**2)
+    
+    # # Convert velocity to km/s and acceleration to m/s²
+    # velocity_km_s     = velocity * 1e3  # 1 Mm/s = 1000 km/s
+    # acceleration_m_s2 = acceleration * 1e6  # 1 Mm/s² = 1,000,000 m/s²
+
+    # print(init_pos_err, init_vel_err, a_err)
+    
+    return (fitted_distance, velocity, velocity_err, acceleration, s0, v0, a, init_pos_err, init_vel_err, a_err)
 
 
 
