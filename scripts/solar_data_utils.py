@@ -220,6 +220,32 @@ def plot_line(angle_deg=None, length=None, start_point=0, end_point=0, map_obj=N
 
 
 
+def plot_line_from_limb(angle_deg, length, map_obj):
+    """
+    Plot a straight line starting from the solar limb at a given angle in degrees
+    (counter-clockwise from solar West).
+    """
+    angle_rad = np.deg2rad(angle_deg)
+    
+    # Solar radius in arcsec
+    solar_radius = map_obj.rsun_obs.to(u.arcsec)
+    
+    # Limb point coordinates (in arcsec)
+    limb_x = solar_radius * np.cos(angle_rad)
+    limb_y = solar_radius * np.sin(angle_rad)
+    
+    # Starting point on the limb
+    start_point = SkyCoord(limb_x, limb_y, frame=map_obj.coordinate_frame)
+    
+    # End point after extending the slit by `length`
+    end_point = SkyCoord(limb_x + length * u.arcsec * np.cos(angle_rad),
+                         limb_y + length * u.arcsec * np.sin(angle_rad),
+                         frame=map_obj.coordinate_frame)
+    
+    line = SkyCoord([start_point, end_point])
+    return line
+
+
 
 def lateral_slits(map_obj=None, central_angle=160, slit_length=500, shift_x=None, shift_y=None):
     """
