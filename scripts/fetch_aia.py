@@ -15,12 +15,12 @@ from tqdm import tqdm
 data_dir = '/home/mnedal/data'
 
 
-date = '2025-05-11'
-start_time = '00:00:00'
-end_time   = '15:00:00'
+date       ='2011-06-07'
+start_time = '06:16:00'
+end_time   = '06:50:00'
 
 # passbands = [94, 131, 171, 193, 211, 335]
-passbands = [304]
+passbands = [193]
 
 with tqdm(total=len(passbands), desc=f'Fetching AIA data ...') as pbar:
     
