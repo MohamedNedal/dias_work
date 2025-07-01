@@ -1,0 +1,10 @@
+solar_shell_gui/
+├── run_software.py          # Entry point
+├── gui/
+│   ├── __init__.py
+│   ├── main_window.py       # Main GUI logic
+│   ├── ellipse_fitter.py    # Handles slider & ellipse fitting logic
+│   ├── three_d_plotter.py   # Makes 3D ellipsoid with Plotly
+│   └── utils.py             # AIA preprocessing, fitting, etc.
+└── assets/
+    └── logo.png (optional GUI branding)
