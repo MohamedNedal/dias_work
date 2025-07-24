@@ -30,6 +30,8 @@ from matplotlib import colors
 import matplotlib.colors as mcolors
 from sunkit_instruments import suvi
 from astropy.visualization import LogStretch
+from tqdm import tqdm
+
 
 
 data_dir = '/home/mnedal/data'
@@ -327,6 +329,32 @@ def remove_redundant_maps(maps):
     
 #     return m_seq_runratio
 
+
+
+# def apply_runratio(maps, vmin=0, vmax=2):
+#     """
+#     Apply running-ratio image technique on EUV images.
+#     See: https://iopscience.iop.org/article/10.1088/0004-637X/750/2/134/pdf
+#         Inputs:
+#             - list of EUV sunpy maps.
+#             - range of the clipping threshold.
+#         Output:
+#             - sequence of run-ratio sunpy maps.
+#     """
+#     runratio = [m / prev_m.quantity for m, prev_m in zip(maps[1:], maps[:-1])]
+#     m_seq_runratio = sunpy.map.Map(runratio, sequence=True)
+    
+#     for m in m_seq_runratio:
+#         m.data[np.isnan(m.data)] = 1
+#         m.plot_settings['norm'] = colors.Normalize(vmin=vmin, vmax=vmax)
+#         m.plot_settings['cmap'] = 'Greys_r'
+    
+#     return m_seq_runratio
+
+
+
+
+
 def apply_runratio(maps, vmin=0, vmax=2):
     """
     Apply running-ratio image technique on EUV images.
@@ -337,15 +365,22 @@ def apply_runratio(maps, vmin=0, vmax=2):
         Output:
             - sequence of run-ratio sunpy maps.
     """
-    runratio = [m / prev_m.quantity for m, prev_m in zip(maps[1:], maps[:-1])]
+    runratio = []
+    with tqdm(total=len(maps), desc='Applying running ratio ...') as pbar:
+        for i in range(1, len(maps)):
+            m = maps[i]
+            prev_m = maps[i - 1]
+            ratio = m / prev_m.quantity
+            ratio.data[np.isnan(ratio.data)] = 1
+            ratio.plot_settings['norm'] = colors.Normalize(vmin=vmin, vmax=vmax)
+            runratio.append(ratio)
+            pbar.update(1)
     m_seq_runratio = sunpy.map.Map(runratio, sequence=True)
-    
-    for m in m_seq_runratio:
-        m.data[np.isnan(m.data)] = 1
-        m.plot_settings['norm'] = colors.Normalize(vmin=vmin, vmax=vmax)
-        m.plot_settings['cmap'] = 'Greys_r'
-    
     return m_seq_runratio
+
+
+
+
 
 
 

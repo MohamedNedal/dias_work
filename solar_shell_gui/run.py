@@ -61,13 +61,13 @@ class AIAViewer(QWidget):
         # --- Create Widgets ---
 
         # Buttons
-        self.load_button = QPushButton('Load FITS Files') # Clearer name
-        self.display_button = QPushButton('Display First Map') # Clearer name
-        self.upgrade_button = QPushButton('Upgrade to Level 1.5') # Clearer name
-        self.run_diff_button = QPushButton('Create Running Diff') # Clearer name
-        self.prev_button = QPushButton('Previous Map') # Clearer name
-        self.next_button = QPushButton('Next Map') # Clearer name
-        self.save_button = QPushButton('Save Current Map') # Clearer name
+        self.load_button = QPushButton('Load FITS Files')
+        self.display_button = QPushButton('Display First Map')
+        self.upgrade_button = QPushButton('Upgrade to Level 1.5')
+        self.run_diff_button = QPushButton('Create Running Diff')
+        self.prev_button = QPushButton('Previous Map')
+        self.next_button = QPushButton('Next Map')
+        self.save_button = QPushButton('Save Current Map')
 
         # Define btn_layout here, right after all buttons it contains are defined
         # Changed to QVBoxLayout for vertical stacking in the right menu
@@ -206,9 +206,6 @@ class AIAViewer(QWidget):
         sliders_layout.addLayout(n_lon_radial_slider_row)
 
         left_section_layout.addLayout(sliders_layout)
-        # The stretch for left_section_layout already gives plot area more space,
-        # and sliders minimal space. No change needed here.
-
         main_layout.addLayout(left_section_layout)
 
 
@@ -246,7 +243,7 @@ class AIAViewer(QWidget):
         # Set a fixed width for the right menu
         right_menu_widget = QWidget()
         right_menu_widget.setLayout(right_menu_layout)
-        right_menu_widget.setFixedWidth(250) # Adjust width as needed
+        right_menu_widget.setFixedWidth(250)
 
         main_layout.addWidget(right_menu_widget)
         
@@ -291,7 +288,7 @@ class AIAViewer(QWidget):
 
             # Model the PFSS field lines
             nrho     = 70  # number of rho grid points
-            rss      = 3 # source surface radius (common value, adjust if needed)
+            rss      = 3   # source surface radius
             pfss_in  = pfsspy.Input(self.gong_map, nrho, rss)
             self.label.setText('Calculating PFSS model...')
             QApplication.processEvents()
@@ -301,7 +298,7 @@ class AIAViewer(QWidget):
             num_footpoints_lat = 40
             num_footpoints_lon = 60
             # Start tracing from a radius slightly above the solar surface
-            r_trace = 1.05 * const.radius # Start slightly above photosphere
+            r_trace = 1.05 * const.radius
 
             lat = np.linspace(np.radians(-90), np.radians(90), num_footpoints_lat, endpoint=False)
             lon = np.linspace(np.radians(-180), np.radians(180), num_footpoints_lon, endpoint=False)
@@ -375,7 +372,7 @@ class AIAViewer(QWidget):
 
     def plot_map(self, amap):
         self.canvas.figure.clf() # Clear the figure
-        self.ellipse_artist = None # Crucially, reset the ellipse artist reference
+        self.ellipse_artist = None # Reset the ellipse artist reference
         
         ax = self.canvas.figure.add_subplot(111, projection=amap)
 
@@ -583,7 +580,8 @@ class AIAViewer(QWidget):
             self.figure.savefig(file_path, bbox_inches='tight', pad_inches=0.05, dpi=300)
             self.label.setText(f'Saved map to {file_path}')
 
-    def create_3d_ellipsoid(self, ellipse_params, sunpy_map, show_shell=True, show_normals=False, show_radials=False, n_lat_radial=10, n_lon_radial=30, show_field_lines=False):
+    def create_3d_ellipsoid(self, ellipse_params, sunpy_map, show_shell=True, show_normals=False,
+                            show_radials=False, n_lat_radial=10, n_lon_radial=30, show_field_lines=False):
         """Create 3D ellipsoid visualization using Plotly"""
         
         fig = go.Figure()
