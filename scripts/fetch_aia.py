@@ -15,17 +15,17 @@ from tqdm import tqdm
 data_dir = '/home/mnedal/data'
 
 
-date       ='2011-06-07'
-start_time = '06:16:00'
-end_time   = '06:50:00'
+date       ='2025-10-06'
+start_time = '08:50:00'
+end_time   = '09:10:00'
 
 # passbands = [94, 131, 171, 193, 211, 335]
-passbands = [193]
+passbands = [131, 171, 193, 304]
+# passbands = [193]
 
 with tqdm(total=len(passbands), desc=f'Fetching AIA data ...') as pbar:
     
     for channel in passbands:
-        
         print(f'Downloading data for AIA channel {channel} on {date} from {start_time} to {end_time} ..')
         
         os.makedirs(f'{data_dir}/AIA/{channel}A/highres/lv1', exist_ok=True)
@@ -39,5 +39,3 @@ with tqdm(total=len(passbands), desc=f'Fetching AIA data ...') as pbar:
         aia_files = Fido.fetch(aia_result, path=f'{data_dir}/AIA/{channel}A/highres/lv1')
         print(f'AIA {channel} data is downloaded successfully')
         pbar.update(1)
-
-
