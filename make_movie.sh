@@ -36,11 +36,14 @@ fi
 # ls -1v *.png
 
 # Define the output movie filename
-OUTPUT_MOVIE="output_${CHANNEL}"
+# OUTPUT_MOVIE="output_${CHANNEL}"
+# OUTPUT_MOVIE="output_${CHANNEL}A_20251006_Reg1"
+OUTPUT_MOVIE="output_${CHANNEL}A_20251006_Full"
 
 # Run ffmpeg to create the movie
 echo "Running ffmpeg..."
-ffmpeg -framerate 10 -i %05d.png -c:v libx264 -pix_fmt yuv420p $OUTPUT_MOVIE.mp4
+# ffmpeg -framerate 10 -i %05d.png -c:v libx264 -pix_fmt yuv420p $OUTPUT_MOVIE.mp4
+ffmpeg -framerate 10 -i %05d.png -vf "pad=ceil(iw/2)*2:ceil(ih/2)*2" -c:v libx264 -pix_fmt yuv420p $OUTPUT_MOVIE.mp4
 
 # Print success message
 echo "Movie created successfully at $DATA_DIR/$OUTPUT_MOVIE"
