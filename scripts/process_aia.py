@@ -147,7 +147,10 @@ def do_process(date_time_str):
 #         print(f'Doing frame {date_time_str} now ..')
 #         do_process(date_time_str)
 
+
+
 datetime_list = []
+
 if single_frame:
     datetime_list.append(target_datetime) 
 else:
@@ -162,5 +165,4 @@ else:
     for date_time_str in datetime_list:
         print(f'Doing frame {date_time_str} now ..')
         do_process(date_time_str)
-
 

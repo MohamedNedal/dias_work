@@ -15,12 +15,12 @@ from tqdm import tqdm
 data_dir = '/home/mnedal/data'
 
 
-date       ='2025-10-06'
-start_time = '08:50:00'
-end_time   = '09:10:00'
+date       = '2024-10-09'
+start_time = '01:00:00'
+end_time   = '03:00:00'
 
-# passbands = [94, 131, 171, 193, 211, 335]
-passbands = [131, 171, 193, 304]
+passbands = [94, 131, 171, 193, 211, 304, 335]
+# passbands = [131, 171, 193, 304]
 # passbands = [193]
 
 with tqdm(total=len(passbands), desc=f'Fetching AIA data ...') as pbar:
@@ -36,6 +36,5 @@ with tqdm(total=len(passbands), desc=f'Fetching AIA data ...') as pbar:
                                          a.Sample(12*u.second))
         
         # aia_files = Fido.fetch(aia_result, path='/home/mnedal/data/{instrument}/{file}')
-        aia_files = Fido.fetch(aia_result, path=f'{data_dir}/AIA/{channel}A/highres/lv1')
-        print(f'AIA {channel} data is downloaded successfully')
+        aia_files = Fido.fetch(aia_result, site='NSO', path=f'{data_dir}/AIA/{channel}A/highres/lv1')
         pbar.update(1)

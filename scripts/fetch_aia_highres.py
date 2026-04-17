@@ -82,7 +82,7 @@ with tqdm(total=len(passbands), desc='Fetching AIA data ...') as pbar:
             a.Sample(args.sample * u.second)
         )
 
-        Fido.fetch(aia_result, path=save_path)
+        Fido.fetch(aia_result, site='NSO', path=save_path)
         logging.info(f'AIA {channel}Å data downloaded.')
 
         # existing_files = list(save_path.glob('*.fits'))
