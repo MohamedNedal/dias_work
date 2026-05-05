@@ -6,7 +6,7 @@ warnings.simplefilter('ignore')
 warnings.filterwarnings('ignore')
 
 import os
-os.environ['OMP_NUM_THREADS'] = '4'
+os.environ['OMP_NUM_THREADS'] = '32'
 
 from sys import path as sys_path
 import os.path
@@ -24,7 +24,7 @@ from astropy.coordinates import SkyCoord
 from astropy.io import fits as fits
 from sunpy.map import Map
 from sunpy.net import Fido, attrs as a
-from sunpy.coordinates import propagate_with_solar_surface
+# from sunpy.coordinates import propagate_with_solar_surface
 import scipy.io as io
 sys_path.append('/home/mnedal/repos/demreg/python')
 from dn2dem_pos import dn2dem_pos
@@ -33,17 +33,19 @@ if script_path not in sys_path:
     sys_path.append(script_path)
 from general_routines import closest
 from aiapy.calibrate import register, update_pointing, estimate_error
-import aiapy.psf
+# import aiapy.psf
 import asdf
-from bisect import bisect_left, bisect_right
-from sunpy.time import parse_time
+# from bisect import bisect_left, bisect_right
+# from sunpy.time import parse_time
 
 
+st = '2025-10-06 08:30:00.00'
+et = '2025-10-06 10:30:00.00'
 single = False
-
-passband = [94, 131, 171, 193, 211, 335]
+passbands = [94, 131, 171, 193, 211, 304, 335]
 data_dir = '/home/mnedal/data'
-os.makedirs(f'{data_dir}/tornado_files/png', exist_ok='True')
+os.makedirs(f'{data_dir}/DEM_20251006/', exist_ok='True')
+output_path = f'{data_dir}/DEM_20251006/'
 
 # START: '2024-05-14 17:00:00.00'
 # END  : '2024-05-14 19:00:00.00'
@@ -173,20 +175,22 @@ if single:
     target_datetime = dt.datetime.strptime(f'{date_time_str}', '%Y-%m-%d %H:%M:%S.%f')
     
     farray = []
-    for channel in passband:
+    for channel in passbands:
         files         = sorted(glob.glob(f'{data_dir}/AIA/{channel}A/highres/lv15/*.fits'))
         closest_index = find_closest_filename(files, channel, target_datetime)
         aia_file      = files[closest_index]
         farray.append(aia_file)
     
     maps = Map(farray)
-    
+
+    # Create a folder for this timestamp
     frame_folder = maps[0].meta['t_rec'][:-1].replace('-','').replace(':','')
-    err_arr_tit  = f'{data_dir}/tornado_files/{frame_folder}/error_data_{frame_folder}.asdf'
-    dem_arr_tit  = f'{data_dir}/tornado_files/{frame_folder}/dem_data_{frame_folder}.asdf'
-    os.makedirs(f'{data_dir}/tornado_files/{frame_folder}', exist_ok='True')
+    err_arr_tit  = f'{output_path}/{frame_folder}/error_data_{frame_folder}.asdf'
+    dem_arr_tit  = f'{output_path}/{frame_folder}/dem_data_{frame_folder}.asdf'
+    os.makedirs(f'{output_path}/{frame_folder}', exist_ok='True')
     
     print(f'\n====================\nProcessing {frame_folder} ...\n====================\n')
+    # Crop the region of interest to extract key info
     top_right   = SkyCoord(-840*u.arcsec, 420*u.arcsec, frame=maps[0].coordinate_frame)
     bottom_left = SkyCoord(-920*u.arcsec, 300*u.arcsec, frame=maps[0].coordinate_frame)
     submap_0    = maps[0].submap(bottom_left, top_right=top_right)
@@ -196,7 +200,7 @@ if single:
     err_array = np.zeros([nx, ny, nf])
     
     for i, m in enumerate(maps):
-        # crop the region of interest
+        # Crop the region of interest to process it
         top_right   = SkyCoord(-840*u.arcsec, 420*u.arcsec, frame=m.coordinate_frame)
         bottom_left = SkyCoord(-920*u.arcsec, 300*u.arcsec, frame=m.coordinate_frame)
         submap      = m.submap(bottom_left, top_right=top_right)
@@ -208,8 +212,8 @@ if single:
     map_array = Map(map_arr[0], map_arr[1], map_arr[2],
                     map_arr[3], map_arr[4], map_arr[5],
                     sequence=True, sortby=None)
-    
-    map_arr_tit = data_dir + '/tornado_files/' + frame_folder + '/prepped_data_{index:03}.fits'
+    # Export FITS file for AIA maps in different channels for this timestamp
+    map_arr_tit = f'{output_path}/{frame_folder}/prepped_data_{{index:03}}.fits'
     map_array.save(map_arr_tit, overwrite='True')
     
     tree = {'err_array': err_array}
@@ -266,23 +270,24 @@ if single:
     fig.tight_layout(pad=0.1, rect=[0, 0, 1, 0.98])
     plt.colorbar(ax=axes.ravel().tolist(), label='$\mathrm{DEM\;[cm^{-5}\;K^{-1}]}$', 
                  aspect=40, pad=0.02)
-    fig.savefig(f'{data_dir}/tornado_files/png/dem_tornado_{frame_folder}.png', format='png', dpi=300, bbox_inches='tight')
-    fig.savefig(f'{data_dir}/tornado_files/{frame_folder}/dem_tornado_{frame_folder}.pdf', format='pdf', bbox_inches='tight')
+    fig.savefig(f'{output_path}/dem_{frame_folder}.png', format='png', dpi=300, bbox_inches='tight')
+    fig.savefig(f'{output_path}/{frame_folder}/dem_tornado_{frame_folder}.pdf', format='pdf', bbox_inches='tight')
     plt.close()
 
 
 
 
 else:
-    datetime_list = make_datetime_range(start_time='2024-05-14 17:00:00.00',
-                                        end_time='2024-05-14 19:00:00.00',
+    datetime_list = make_datetime_range(start_time=st,
+                                        end_time=et,
                                         cadence=12) # range of frames
+    print(f'Datetimes list created from {datetime_list[0]} to {datetime_list[-1]}')
     
     for date_time_str in datetime_list:
         target_datetime = dt.datetime.strptime(f'{date_time_str}', '%Y-%m-%d %H:%M:%S.%f')
         
         farray = []
-        for channel in passband:
+        for channel in passbands:
             files         = sorted(glob.glob(f'{data_dir}/AIA/{channel}A/highres/lv15/*.fits'))
             closest_index = find_closest_filename(files, channel, target_datetime)
             aia_file      = files[closest_index]
@@ -291,10 +296,10 @@ else:
         maps = Map(farray)
         
         frame_folder = maps[0].meta['t_rec'][:-1].replace('-','').replace(':','')
-        err_arr_tit  = f'{data_dir}/tornado_files/{frame_folder}/error_data_{frame_folder}.asdf'
-        dem_arr_tit  = f'{data_dir}/tornado_files/{frame_folder}/dem_data_{frame_folder}.asdf'
+        err_arr_tit  = f'{output_path}/{frame_folder}/error_data_{frame_folder}.asdf'
+        dem_arr_tit  = f'{output_path}/{frame_folder}/dem_data_{frame_folder}.asdf'
         
-        if os.path.exists(f'{data_dir}/tornado_files/{frame_folder}'):
+        if os.path.exists(f'{output_path}/{frame_folder}'):
             if os.path.exists(err_arr_tit) and os.path.exists(dem_arr_tit):
                 print(f'{frame_folder} exists and processed already.')
                 pass
@@ -303,21 +308,23 @@ else:
                 print('Process it manually.')
                 check_manually.append(date_time_str)
         else:
-            os.makedirs(f'{data_dir}/tornado_files/{frame_folder}', exist_ok='True')
+            os.makedirs(f'{output_path}/{frame_folder}', exist_ok='True')
             
             print(f'\n====================\nProcessing {frame_folder} ...\n====================\n')
-            top_right   = SkyCoord(-840*u.arcsec, 420*u.arcsec, frame=maps[0].coordinate_frame)
-            bottom_left = SkyCoord(-920*u.arcsec, 300*u.arcsec, frame=maps[0].coordinate_frame)
+            ## CENTRAL REGION
+            top_right   = SkyCoord(400*u.arcsec, 300*u.arcsec, frame=maps[0].coordinate_frame)
+            bottom_left = SkyCoord(30*u.arcsec, -70*u.arcsec, frame=maps[0].coordinate_frame)
             submap_0    = maps[0].submap(bottom_left, top_right=top_right)
             nx, ny      = submap_0.data.shape
             nf          = len(maps)
             map_arr     = []
-            err_array = np.zeros([nx, ny, nf])
+            err_array   = np.zeros([nx, ny, nf])
             
             for i, m in enumerate(maps):
                 # crop the region of interest
-                top_right   = SkyCoord(-840*u.arcsec, 420*u.arcsec, frame=m.coordinate_frame)
-                bottom_left = SkyCoord(-920*u.arcsec, 300*u.arcsec, frame=m.coordinate_frame)
+                ## CENTRAL REGION
+                top_right   = SkyCoord(400*u.arcsec, 300*u.arcsec, frame=m.coordinate_frame)
+                bottom_left = SkyCoord(30*u.arcsec, -70*u.arcsec, frame=m.coordinate_frame)
                 submap      = m.submap(bottom_left, top_right=top_right)
                 map_arr.append(submap)
                 
@@ -328,7 +335,7 @@ else:
                             map_arr[3], map_arr[4], map_arr[5],
                             sequence=True, sortby=None)
             
-            map_arr_tit = data_dir + '/tornado_files/' + frame_folder + '/prepped_data_{index:03}.fits'
+            map_arr_tit = f'{output_path}/{frame_folder}/prepped_data_{{index:03}}.fits'
             map_array.save(map_arr_tit, overwrite='True')
             
             tree = {'err_array': err_array}
@@ -385,8 +392,8 @@ else:
             fig.tight_layout(pad=0.1, rect=[0, 0, 1, 0.98])
             plt.colorbar(ax=axes.ravel().tolist(), label='$\mathrm{DEM\;[cm^{-5}\;K^{-1}]}$', 
                          aspect=40, pad=0.02)
-            fig.savefig(f'{data_dir}/tornado_files/png/dem_tornado_{frame_folder}.png', format='png', dpi=300, bbox_inches='tight')
-            fig.savefig(f'{data_dir}/tornado_files/{frame_folder}/dem_tornado_{frame_folder}.pdf', format='pdf', bbox_inches='tight')
+            fig.savefig(f'{doutput_path}/dem_{frame_folder}.png', format='png', dpi=300, bbox_inches='tight')
+            fig.savefig(f'{output_path}/{frame_folder}/dem_{frame_folder}.pdf', format='pdf', bbox_inches='tight')
             plt.close()
     
     print('\n\nCheck the following folders manually:')
