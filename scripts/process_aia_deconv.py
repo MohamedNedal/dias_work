@@ -27,7 +27,7 @@ def do_process(aia_file):
     m = Map(aia_file)
     print(f'Upgrade AIA {channel}A {aia_file.split("/")[-1]} map to lv1.5 and deconvolve with PSF ..\n')
     psf                      = aiapy.psf.psf(m.wavelength)
-    aia_map_deconvolved      = aiapy.psf.deconvolve(m, psf=psf, iterations=10)
+    aia_map_deconvolved      = aiapy.psf.deconvolve(m, psf=psf)#, iterations=10)
     print('Deconvolution is finished')
     aia_map_updated_pointing = update_pointing(aia_map_deconvolved)
     print('Updating pointing is finished')

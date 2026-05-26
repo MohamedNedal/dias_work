@@ -6,7 +6,8 @@ warnings.simplefilter('ignore')
 warnings.filterwarnings('ignore')
 
 import os
-os.environ['OMP_NUM_THREADS'] = '32'
+print(f"Physical cores available: {os.cpu_count()}")
+os.environ['OMP_NUM_THREADS'] = '20' # 8, 20, 32
 
 import os.path
 from sys import path as sys_path
@@ -35,13 +36,13 @@ from tqdm import tqdm
 mydate    = '2025-10-06'
 YEAR, MONTH, DAY = mydate.split('-')
 data_dir  = '/home/mnedal/data'
-passbands = [131, 171, 193, 211, 304]
+passbands = [94, 131, 171, 193, 211, 335]
 os.makedirs(f'{data_dir}/DEM_{mydate.replace("-","")}', exist_ok='True')
 output_path = f'{data_dir}/DEM_{mydate.replace("-","")}'
 
 # ── Chunk definition: set these per screen ────────────────────────────────────
-chunk_start = datetime(int(YEAR), int(MONTH), int(DAY), 8, 30, 0)   # <-- edit per screen
-chunk_end   = datetime(int(YEAR), int(MONTH), int(DAY), 8, 45, 0)   # <-- edit per screen
+chunk_start = datetime(int(YEAR), int(MONTH), int(DAY), 8, 45, 0)   # <-- edit per screen
+chunk_end   = datetime(int(YEAR), int(MONTH), int(DAY), 9, 5, 0)   # <-- edit per screen
 # ─────────────────────────────────────────────────────────────────────────────
 
 print('=====================================\n Apply DME analysis on AIA lv1.5 images \n =====================================')
@@ -92,33 +93,48 @@ def group_files_by_timestep(all_files, tolerance_seconds=7):
     return groups
 
 
+
 def calculate_dem(map_array, err_array):
     """
-    Function to calculate DEM.
+    Function to calculate DEM with shape-safety checks.
     """
-    nx, ny      = map_array[0].data.shape
-    nf          = len(map_array)
+    # Use the dimensions from the err_array (which we know are consistent)
+    nx, ny, nf = err_array.shape 
     image_array = np.zeros((nx, ny, nf))
-    for img in range(0, nf):
-        image_array[:,:,img] = map_array[img].data
+
+    for img in range(nf):
+        data = map_array[img].data
+        if data.shape != (nx, ny):
+            # If the image is the wrong size (e.g., 4094 instead of 4096),
+            # we pad it into a correctly sized zero-array.
+            padded_data = np.zeros((nx, ny))
+            row_limit = min(nx, data.shape[0])
+            col_limit = min(ny, data.shape[1])
+            padded_data[:row_limit, :col_limit] = data[:row_limit, :col_limit]
+            image_array[:,:,img] = padded_data
+        else:
+            image_array[:,:,img] = data
     
     trin = io.readsav('/home/mnedal/data/aia_tresp_en.dat')
     tresp_logt = np.array(trin['logt'])
-    nt         = len(tresp_logt)
-    nf         = len(trin['tr'][:])
-    trmatrix   = np.zeros((nt,nf))
-    for i in range(0,nf):
+    nt = len(tresp_logt)
+    nf_resp = len(trin['tr'][:])
+    trmatrix = np.zeros((nt, nf_resp))
+    for i in range(nf_resp):
         trmatrix[:,i] = trin['tr'][i]    
     
-    t_space  = 0.1
-    t_min    = 5.6
-    t_max    = 7.4
+    t_space = 0.1
+    t_min = 5.6
+    t_max = 7.4
     logtemps = np.linspace(t_min, t_max, num=int((t_max-t_min)/t_space)+1)
-    temps    = 10**logtemps
-    mlogt    = ([np.mean([(np.log10(temps[i])), np.log10((temps[i+1]))]) for i in np.arange(0, len(temps)-1)])
+    temps = 10**logtemps
+    mlogt = ([np.mean([(np.log10(temps[i])), np.log10((temps[i+1]))]) for i in np.arange(0, len(temps)-1)])
+    
     dem, edem, elogt, chisq, dn_reg = dn2dem_pos(image_array, err_array, trmatrix, tresp_logt, temps, max_iter=15)
     dem = dem.clip(min=0)
+    
     return dem, edem, elogt, chisq, dn_reg, mlogt, logtemps
+
 
 
 # ── Collect all files ─────────────────────────────────────────────────────────
@@ -156,7 +172,7 @@ print(f'    Duration: {chunk_end - chunk_start}\n')
 
 # ── Group and filter to chunk ─────────────────────────────────────────────────
 
-all_groups    = group_files_by_timestep(all_files, tolerance_seconds=7)
+all_groups    = group_files_by_timestep(all_files, tolerance_seconds=12)
 chunk_groups  = [g for g in all_groups if chunk_start <= g['timestamp'] <= chunk_end]
 
 print(f'  Total timesteps in dataset : {len(all_groups)}')
@@ -175,107 +191,79 @@ with tqdm(total=len(chunk_groups), desc='Timesteps processed') as pbar:
         for key in files:
             print(f'{key}: {files[key]}')
         
-        for channel in passbands:
-            if channel not in files:
-                print(f'  [{channel}A] No file found for this timestep, skipping.')
-                continue
+        # 1. Check if ALL required passbands are present for this timestep
+        missing_channels = [cp for cp in passbands if cp not in files]
+        if missing_channels:
+            print(f'  [Timestep {ts}] Missing channels {missing_channels}, skipping.')
+            pbar.update(1)
+            continue
 
-            aia_filenames = [ files[key] for key in files ]
-            # print(len(aia_filenames), type(aia_filenames))
-            # break
-            maps = Map(aia_filenames)
-            
-            frame_folder = maps[0].meta['t_rec'][:-1].replace('-','').replace(':','')
-            err_arr_tit  = f'{output_path}/{frame_folder}/error_data_{frame_folder}.asdf'
-            dem_arr_tit  = f'{output_path}/{frame_folder}/dem_data_{frame_folder}.asdf'
+        frame_folder = ts.strftime("%Y%m%d_%H%M%S")
+        err_arr_tit = f'{output_path}/{frame_folder}/error_data_{frame_folder}.asdf'
+        dem_arr_tit = f'{output_path}/{frame_folder}/dem_data_{frame_folder}.asdf'
 
-            if os.path.exists(f'{output_path}/{frame_folder}'):
-                if os.path.exists(err_arr_tit) and os.path.exists(dem_arr_tit):
-                    print(f'{frame_folder} exists and processed already.')
-                    pass
-                else:
-                    print(f'DEM file is missing from {frame_folder}!\nProcess it manually.')
-                    check_manually.append(ts.strftime("%Y-%m-%dT%H:%M:%S"))
+        # 2. Check if already processed
+        if os.path.exists(err_arr_tit) and os.path.exists(dem_arr_tit):
+            print(f'{frame_folder} already processed.')
+            pbar.update(1)
+            continue
+
+        print(f'\nProcessing {frame_folder} ...')
+        os.makedirs(f'{output_path}/{frame_folder}', exist_ok=True)
+
+        # 3. Load and Prep Maps
+        # Ensure files are loaded in the specific order of your passbands list
+        ordered_files = [files[pb] for pb in passbands]
+        maps = Map(ordered_files)
+
+        # Get target dimensions from the first map
+        nx, ny = maps[0].data.shape
+        nf = len(maps)
+        err_array = np.zeros([nx, ny, nf])
+        valid_maps = []
+
+        for i, m in enumerate(maps):
+            # If shapes mismatch, we need to handle it. 
+            # Here we ensure the data matches nx, ny before inserting into the array.
+            if m.data.shape != (nx, ny):
+                print(f"Warning: Reshaping {m.wavelength} from {m.data.shape} to {(nx, ny)}")
+                # Use submap or simple padding/cropping to fix dimensions
+                # For DEM, it's safer to ensure they were registered correctly first
+                # If they are off by only 2 pixels, they likely weren't padded during 'register'
+                m_data = np.zeros((nx, ny))
+                min_x = min(nx, m.data.shape[0])
+                min_y = min(ny, m.data.shape[1])
+                m_data[:min_x, :min_y] = m.data[:min_x, :min_y]
             else:
-                print(f'\n====================\nProcessing {frame_folder} ...\n====================\n')
-                os.makedirs(f'{output_path}/{frame_folder}', exist_ok='True')
-                
-                nx, ny    = maps[0].data.shape
-                nf        = len(maps)
-                err_array = np.zeros([nx, ny, nf])
-                
-                for i, m in enumerate(maps):
-                    num_pix = m.data.size
-                    err_array[:,:,i] = estimate_error(m.data*(u.ct/u.pix), m.wavelength, n_samples=num_pix)
-                
-                map_array = Map(maps[0], maps[1], maps[2],
-                                maps[3], maps[4], maps[5],
-                                sequence=True, sortby=None)
-                
-                map_arr_tit = f'{output_path}/{frame_folder}/prepped_data_{{index:03}}.fits'
-                map_array.save(map_arr_tit, overwrite='True')
-                
-                tree = {'err_array': err_array}
-                with asdf.AsdfFile(tree) as asdf_file:
-                    asdf_file.write_to(err_arr_tit, all_array_compression='zlib')
-                
-                print('Calculating DEM ..')
-                dem, edem, elogt, chisq, dn_reg, mlogt, logtemps = calculate_dem(map_array, err_array)
-                
-                tree = {'dem':dem, 'edem':edem, 'mlogt':mlogt, 'elogt':elogt, 'chisq':chisq, 'logtemps':logtemps}
-                with asdf.AsdfFile(tree) as asdf_file:
-                    asdf_file.write_to(dem_arr_tit, all_array_compression='zlib')
+                m_data = m.data
 
-            print(f'DEM analysis for {channel}A finished successfully.')
+            # Calculate error
+            err_array[:,:,i] = estimate_error(m_data * (u.ct/u.pix), m.wavelength, n_samples=m_data.size)
+            valid_maps.append(m)
 
-            
-            # try:
-            #     maps = Map(files)
-                
-            #     frame_folder = maps[0].meta['t_rec'][:-1].replace('-','').replace(':','')
-            #     err_arr_tit  = f'{output_path}/{frame_folder}/error_data_{frame_folder}.asdf'
-            #     dem_arr_tit  = f'{output_path}/{frame_folder}/dem_data_{frame_folder}.asdf'
+        # 4. Create MapSequence and Save
+        map_array = Map(valid_maps, sequence=True)
+        map_arr_tit_pattern = f'{output_path}/{frame_folder}/prepped_data_{{index:03}}.fits'
+        map_array.save(map_arr_tit_pattern, overwrite=True)
 
-            #     if os.path.exists(f'{output_path}/{frame_folder}'):
-            #         if os.path.exists(err_arr_tit) and os.path.exists(dem_arr_tit):
-            #             print(f'{frame_folder} exists and processed already.')
-            #             pass
-            #         else:
-            #             print(f'DEM file is missing from {frame_folder}!\nProcess it manually.')
-            #             check_manually.append(date_time_str)
-            #     else:
-            #         print(f'\n====================\nProcessing {frame_folder} ...\n====================\n')
-            #         os.makedirs(f'{output_path}/{frame_folder}', exist_ok='True')
-                    
-            #         nx, ny    = maps[0].data.shape
-            #         nf        = len(maps)
-            #         err_array = np.zeros([nx, ny, nf])
-                    
-            #         for i, m in enumerate(maps):
-            #             num_pix = m.data.size
-            #             err_array[:,:,i] = estimate_error(submap.data*(u.ct/u.pix), m.wavelength, n_samples=num_pix)
-                    
-            #         map_array = Map(maps[0], maps[1], maps[2],
-            #                         maps[3], maps[4], maps[5],
-            #                         sequence=True, sortby=None)
-                    
-            #         map_arr_tit = f'{output_path}/{frame_folder}/prepped_data_{{index:03}}.fits'
-            #         map_array.save(map_arr_tit, overwrite='True')
-                    
-            #         tree = {'err_array': err_array}
-            #         with asdf.AsdfFile(tree) as asdf_file:
-            #             asdf_file.write_to(err_arr_tit, all_array_compression='zlib')
-                    
-            #         print('Calculating DEM ..')
-            #         dem, edem, elogt, chisq, dn_reg, mlogt, logtemps = calculate_dem(map_array, err_array)
-                    
-            #         tree = {'dem':dem, 'edem':edem, 'mlogt':mlogt, 'elogt':elogt, 'chisq':chisq, 'logtemps':logtemps}
-            #         with asdf.AsdfFile(tree) as asdf_file:
-            #             asdf_file.write_to(dem_arr_tit, all_array_compression='zlib')
-
-            #     print(f'DEM analysis for {channel}A finished successfully.')
-                
-            # except Exception as e:
-            #     print(f'  [{channel}A] ERROR: {e}')
-
+        # Save error array
+        with asdf.AsdfFile({'err_array': err_array}) as af:
+            af.write_to(err_arr_tit, all_array_compression='zlib')
+        
+        # 5. Calculate and Save DEM
+        print('Calculating DEM...')
+        dem, edem, elogt, chisq, dn_reg, mlogt, logtemps = calculate_dem(map_array, err_array)
+        
+        tree = {
+            'dem': dem, 
+            'edem': edem, 
+            'mlogt': mlogt, 
+            'elogt': elogt, 
+            'chisq': chisq, 
+            'logtemps': logtemps
+        }
+        with asdf.AsdfFile(tree) as af:
+            af.write_to(dem_arr_tit, all_array_compression='zlib')
+        
+        print(f'Step {frame_folder} finished.')
         pbar.update(1)
