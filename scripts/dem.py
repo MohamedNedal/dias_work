@@ -6,566 +6,411 @@ warnings.simplefilter('ignore')
 warnings.filterwarnings('ignore')
 
 import os
-os.environ['OMP_NUM_THREADS'] = '32'
+print(f"Physical cores available: {os.cpu_count()}")
+os.environ['OMP_NUM_THREADS'] = '20' # 8, 20, 32
 
-from sys import path as sys_path
 import os.path
-import platform
-import datetime as dt
-from aiapy.calibrate.prep import correct_degradation
-import numpy as np
-import glob
-import matplotlib
-matplotlib.use('Agg')
-from matplotlib import pyplot as plt
-import matplotlib.colors as colors
-import astropy.units as u
-from astropy.coordinates import SkyCoord
-from astropy.io import fits as fits
-from sunpy.map import Map
-from sunpy.net import Fido, attrs as a
-# from sunpy.coordinates import propagate_with_solar_surface
-import scipy.io as io
+from sys import path as sys_path
 sys_path.append('/home/mnedal/repos/demreg/python')
-from dn2dem_pos import dn2dem_pos
 script_path = os.path.abspath('./scripts')
 if script_path not in sys_path:
     sys_path.append(script_path)
-from general_routines import closest
-from aiapy.calibrate import register, update_pointing, estimate_error
-# import aiapy.psf
+
+import re
 import asdf
-# from bisect import bisect_left, bisect_right
-# from sunpy.time import parse_time
+import glob
+import numpy as np
+import scipy.io as io
+from bisect import bisect_left
+from datetime import datetime, timedelta
+from sunpy.map import Map
+from astropy import units as u
+from astropy.coordinates import SkyCoord
+from aiapy.calibrate.prep import correct_degradation
+from aiapy.calibrate import register, update_pointing, estimate_error
+from aiapy.calibrate.prep import correct_degradation
+from dn2dem_pos import dn2dem_pos
+from tqdm import tqdm
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+mydate    = '2025-10-06'
+YEAR, MONTH, DAY = mydate.split('-')
+data_dir  = '/home/mnedal/data'
+passbands = [94, 131, 171, 193, 211, 335]
+os.makedirs(f'{data_dir}/DEM_{mydate.replace("-","")}', exist_ok='True')
+output_path = f'{data_dir}/DEM_{mydate.replace("-","")}'
+
+# ── Chunk definition: set these per screen ────────────────────────────────────
+chunk_start = datetime(int(YEAR), int(MONTH), int(DAY), 8, 45, 0)    # <-- edit per screen (08:30)
+chunk_end   = datetime(int(YEAR), int(MONTH), int(DAY), 9, 5, 0)    # <-- edit per screen (09:05)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Region of interest (arcsec, Helioprojective) ─────────────────────────────
+# Set all four to None to process the full disk.
+
+# West limb region
+ROI_TOP    = 300    # arcsec
+ROI_RIGHT  = 1210   # arcsec
+ROI_BOTTOM = -300   # arcsec
+ROI_LEFT   = 800    # arcsec
+
+# # Central region
+# ROI_TOP    =  400   # arcsec
+# ROI_RIGHT  =  500   # arcsec
+# ROI_BOTTOM = -200   # arcsec
+# ROI_LEFT   = -120   # arcsec
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+print('=====================================\n Apply DME analysis on AIA lv1.5 images \n =====================================')
 
 
-st = '2025-10-06 08:30:00.00'
-et = '2025-10-06 10:30:00.00'
-single = False
-passbands = [94, 131, 171, 193, 211, 304, 335]
-data_dir = '/home/mnedal/data'
-os.makedirs(f'{data_dir}/DEM_20251006/', exist_ok='True')
-output_path = f'{data_dir}/DEM_20251006/'
-
-# START: '2024-05-14 17:00:00.00'
-# END  : '2024-05-14 19:00:00.00'
-
-check_manually = []
-
-# Define constants and make the data directories
-# data_disk = '/home/mnedal/data/AIA/'
-# os.makedirs(data_disk, exist_ok='True')
-
-# Function with event information
-# start_time = '2024/05/14 17:00:00'
-# end_time   = '2024/05/14 19:00:00'
-
-# ref_file_date = dt.datetime.strftime(dt.datetime.strptime(ref_time,'%Y/%m/%d %H:%M:%S'), '%Y/%m/%d')
-# img_file_date = dt.datetime.strftime(dt.datetime.strptime(ref_time,'%Y/%m/%d %H:%M:%S'), '%Y/%m/%d')
-
-# Define and make the output directories
-# output_dir = f'{data_disk}/DEM/{img_file_date}/'
-
-# os.makedirs(output_dir, exist_ok='True')
-# passband = [94, 131, 171, 193, 211, 335]
+def parse_timestamp(filepath):
+    """Extract datetime from AIA filename."""
+    basename = os.path.basename(filepath)
+    match = re.search(r'(\d{4}_\d{2}_\d{2}T\d{2}_\d{2}_\d{2})', basename)
+    if not match:
+        raise ValueError(f'No timestamp pattern found in filename: {basename}')
+    return datetime.strptime(match.group(1), '%Y_%m_%dT%H_%M_%S')
 
 
-def extract_datetime(filename, channel):
+def group_files_by_timestep(all_files, tolerance_seconds=6):
     """
-    Function to extract the datetime from a filename.
+    Group AIA files into per-cadence sets, one group per physical observation.
+
+    Strategy: take the most-populated channel as the cadence reference grid;
+    for every other channel, snap to the file whose timestamp is closest to the
+    reference within `tolerance_seconds`. Channels with no file inside the
+    window are simply absent from the group (the caller's "missing channels"
+    check will then skip that timestep).
+
+    CRITICAL: tolerance_seconds MUST be strictly less than the AIA cadence
+    (~12 s) — practically less than cadence/2 to leave headroom for the
+    inter-channel offset within a single observation. With tolerance close to
+    or exceeding the cadence, files from adjacent cadences leak into the same
+    group, mixing channels taken 12 s apart and producing a cyclical artefact
+    in the output DEM series (every Nth frame is built from inconsistent
+    inputs and the same mis-pairing pattern recurs every few frames).
     """
-    # Split the filename and extract the date and time parts
-    date_time_part = filename.split('/')[-1]                            # Extracts '2024_05_14T18_49_59.12'
-    date_part = date_time_part.split('T')[0].split(f'{channel}A_')[-1]  # Extracts '2024_05_14'
-    time_part = date_time_part.split('T')[1].split('Z')[0]              # Extracts '18_49_59.12'
-    
-    # Reformat date and time to standard datetime format
-    date_str = date_part.replace('_', '-')  # '2024-05-14'
-    time_str = time_part.replace('_', ':')  # '18:49:59.12'
-    
-    # Combine date and time and convert to datetime object
-    return dt.datetime.strptime(f'{date_str} {time_str}', '%Y-%m-%d %H:%M:%S.%f')
+    if not any(all_files.values()):
+        return []
+
+    # Parse and sort all entries per channel once
+    parsed = {}
+    for channel, files in all_files.items():
+        ch_entries = []
+        for f in files:
+            try:
+                ch_entries.append((parse_timestamp(f), f))
+            except ValueError:
+                print(f'Warning: Could not parse timestamp from {f}, skipping.')
+        ch_entries.sort(key=lambda x: x[0])
+        parsed[channel] = ch_entries
+
+    # Reference channel = the one with most files; it defines the cadence grid.
+    ref_channel = max(parsed, key=lambda c: len(parsed[c]))
+    print(f'  Grouping reference channel: {ref_channel}A '
+          f'({len(parsed[ref_channel])} files, tolerance ±{tolerance_seconds}s)')
+
+    tol = timedelta(seconds=tolerance_seconds)
+    ts_lists = {ch: [t for t, _ in entries] for ch, entries in parsed.items()}
+
+    groups = []
+    for ref_ts, ref_file in parsed[ref_channel]:
+        files_for_group = {ref_channel: ref_file}
+        for channel, entries in parsed.items():
+            if channel == ref_channel:
+                continue
+            ts_list = ts_lists[channel]
+            if not ts_list:
+                continue
+            # bisect: closest entry to ref_ts is at index i-1 or i
+            i = bisect_left(ts_list, ref_ts)
+            best_f, best_dt = None, tol + timedelta(seconds=1)
+            for j in (i - 1, i):
+                if 0 <= j < len(ts_list):
+                    dt = abs(ts_list[j] - ref_ts)
+                    if dt <= tol and dt < best_dt:
+                        best_dt = dt
+                        best_f = entries[j][1]
+            if best_f is not None:
+                files_for_group[channel] = best_f
+        groups.append({'timestamp': ref_ts, 'files': files_for_group})
+
+    return groups
 
 
-def find_closest_filename(filenames, channel, target_datetime):
-    """
-    Function to find the index of the filename with the closest datetime to a given target.
-    """
-    closest_index = None
-    min_time_diff = None
-    
-    for i, filename in enumerate(filenames):
-        file_datetime = extract_datetime(filename, channel)
-        
-        # Calculate the absolute time difference
-        time_diff = abs(file_datetime - target_datetime)
-        
-        # Update the closest file if this one is closer
-        if min_time_diff is None or time_diff < min_time_diff:
-            min_time_diff = time_diff
-            closest_index = i
-    
-    return closest_index
 
-
-def calculate_dem(map_array, err_array):
+def load_tresp(tresp_path='/home/mnedal/data/aia_tresp_en.dat'):
     """
-    Function to calculate DEM.
+    Load the AIA temperature response data once and return all derived
+    quantities needed by calculate_dem_tiled.  Call this once before the
+    main loop so the .dat file is not re-read for every timestep.
     """
-    nx, ny      = map_array[0].data.shape
-    nf          = len(map_array)
-    image_array = np.zeros((nx, ny, nf))
-    for img in range(0, nf):
-        image_array[:,:,img] = map_array[img].data
-    
-    if platform.system() == 'Linux':
-        trin = io.readsav('/home/mnedal/data/aia_tresp_en.dat')
-        
+    trin       = io.readsav(tresp_path)
     tresp_logt = np.array(trin['logt'])
     nt         = len(tresp_logt)
-    nf         = len(trin['tr'][:])
-    trmatrix   = np.zeros((nt,nf))
-    for i in range(0,nf):
-        trmatrix[:,i] = trin['tr'][i]    
-    
+    nf_resp    = len(trin['tr'][:])
+    trmatrix   = np.zeros((nt, nf_resp))
+    for i in range(nf_resp):
+        trmatrix[:, i] = trin['tr'][i]
+
     t_space  = 0.1
     t_min    = 5.6
     t_max    = 7.4
-    logtemps = np.linspace(t_min, t_max, num=int((t_max-t_min)/t_space)+1)
-    temps    = 10**logtemps
-    mlogt    = ([np.mean([(np.log10(temps[i])), np.log10((temps[i+1]))]) for i in np.arange(0, len(temps)-1)])
-    dem, edem, elogt, chisq, dn_reg = dn2dem_pos(image_array, err_array, trmatrix, tresp_logt, temps, max_iter=15)
-    dem = dem.clip(min=0)
-    return dem, edem, elogt, chisq, dn_reg, mlogt, logtemps
+    logtemps = np.linspace(t_min, t_max, num=int((t_max - t_min) / t_space) + 1)
+    temps    = 10 ** logtemps
+    mlogt    = [np.mean([np.log10(temps[i]), np.log10(temps[i + 1])])
+                for i in range(len(temps) - 1)]
+
+    return tresp_logt, trmatrix, temps, mlogt, logtemps
 
 
-def make_datetime_range(start_time=None, end_time=None, cadence=None):
+def calculate_dem_tiled(map_array, err_array, tresp_logt, trmatrix, temps,
+                        mlogt, logtemps, tile_size=512):
     """
-    Make a list of datetime strings between two given datetime strings.
-    Cadence is in seconds.
+    Calculate DEM in spatial tiles to avoid OOM on full 4096×4096 frames.
+
+    Processing the whole image at once allocates ~25–30 GB of working memory
+    (image + error + dem/edem/elogt/dn_reg outputs + dn2dem_pos internals).
+    The OOM killer silently terminates the process with no traceback.
+
+    With tile_size=512, peak memory per tile is ~140 MB, and the full-frame
+    output arrays are assembled incrementally.
+
+    Parameters
+    ----------
+    map_array   : sunpy MapSequence  (nf maps of shape nx×ny)
+    err_array   : np.ndarray         shape (nx, ny, nf)
+    tresp_logt / trmatrix / temps / mlogt / logtemps : from load_tresp()
+    tile_size   : int  – spatial tile edge in pixels (default 512)
     """
-    from datetime import datetime, timedelta
-    
-    # Given start and end times
-    st = datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S.%f')
-    et = datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S.%f')
-    
-    # Create list of datetime strings with 12-second cadence
-    datetime_list = []
-    current_time = st
-    
-    while current_time <= et:
-        datetime_list.append(current_time.strftime('%Y-%m-%d %H:%M:%S.%f'))
-        current_time += timedelta(seconds=cadence)
-    
-    return datetime_list
+    nx, ny, nf = err_array.shape
+    nt_dem     = len(mlogt)
 
-# ==============================================================================================
-
-
-
-
-
-
-# Your target date and time
-if single:
-    date_time_str = '2024-05-14 17:58:36.00'
-    print(f'\nDoing a single frame: {date_time_str} ..\n')
-
-    target_datetime = dt.datetime.strptime(f'{date_time_str}', '%Y-%m-%d %H:%M:%S.%f')
-    
-    farray = []
-    for channel in passbands:
-        files         = sorted(glob.glob(f'{data_dir}/AIA/{channel}A/highres/lv15/*.fits'))
-        closest_index = find_closest_filename(files, channel, target_datetime)
-        aia_file      = files[closest_index]
-        farray.append(aia_file)
-    
-    maps = Map(farray)
-
-    # Create a folder for this timestamp
-    frame_folder = maps[0].meta['t_rec'][:-1].replace('-','').replace(':','')
-    err_arr_tit  = f'{output_path}/{frame_folder}/error_data_{frame_folder}.asdf'
-    dem_arr_tit  = f'{output_path}/{frame_folder}/dem_data_{frame_folder}.asdf'
-    os.makedirs(f'{output_path}/{frame_folder}', exist_ok='True')
-    
-    print(f'\n====================\nProcessing {frame_folder} ...\n====================\n')
-    # Crop the region of interest to extract key info
-    top_right   = SkyCoord(-840*u.arcsec, 420*u.arcsec, frame=maps[0].coordinate_frame)
-    bottom_left = SkyCoord(-920*u.arcsec, 300*u.arcsec, frame=maps[0].coordinate_frame)
-    submap_0    = maps[0].submap(bottom_left, top_right=top_right)
-    nx, ny      = submap_0.data.shape
-    nf          = len(maps)
-    map_arr     = []
-    err_array = np.zeros([nx, ny, nf])
-    
-    for i, m in enumerate(maps):
-        # Crop the region of interest to process it
-        top_right   = SkyCoord(-840*u.arcsec, 420*u.arcsec, frame=m.coordinate_frame)
-        bottom_left = SkyCoord(-920*u.arcsec, 300*u.arcsec, frame=m.coordinate_frame)
-        submap      = m.submap(bottom_left, top_right=top_right)
-        map_arr.append(submap)
-        
-        num_pix = submap.data.size
-        err_array[:,:,i] = estimate_error(submap.data*(u.ct/u.pix), submap.wavelength, n_samples=num_pix)
-    
-    map_array = Map(map_arr[0], map_arr[1], map_arr[2],
-                    map_arr[3], map_arr[4], map_arr[5],
-                    sequence=True, sortby=None)
-    # Export FITS file for AIA maps in different channels for this timestamp
-    map_arr_tit = f'{output_path}/{frame_folder}/prepped_data_{{index:03}}.fits'
-    map_array.save(map_arr_tit, overwrite='True')
-    
-    tree = {'err_array': err_array}
-    with asdf.AsdfFile(tree) as asdf_file:
-        asdf_file.write_to(err_arr_tit, all_array_compression='zlib')
-    
-    # # export prepped maps as asdf file
-    # files = sorted(glob.glob(f'{data_dir}/tornado_files/*.fits'))
-    # tree = {}
-    # for i, file in enumerate(files):
-    #     tree[f'image_array_{i}'] = Map(file)
-    # with asdf.AsdfFile(tree) as asdf_file:
-    #     asdf_file.write_to(f'{data_dir}/tornado_files/image_arrays_{frame_folder}.asdf', all_array_compression='zlib')
-    
-    print('Calculating DEM ...')
-    dem, edem, elogt, chisq, dn_reg, mlogt, logtemps = calculate_dem(map_array, err_array)
-    
-    tree = {'dem':dem, 'edem':edem, 'mlogt':mlogt, 'elogt':elogt, 'chisq':chisq, 'logtemps':logtemps}
-    with asdf.AsdfFile(tree) as asdf_file:
-        asdf_file.write_to(dem_arr_tit, all_array_compression='zlib')
-    
-    # Get a submap to have the scales and image properties
-    nt     = len(dem[0,0,:])
-    nt_new = int(nt/2)
-    nc, nr = 3, 3
-    plt.rcParams.update({'font.size':12, 'font.family':"DejaVu Sans",\
-                         'font.sans-serif':"DejaVu Sans", 'mathtext.default':"regular"})
-    
-    fig, axes = plt.subplots(nrows=nr, ncols=nc, figsize=[12,12], sharex=True, sharey=True, subplot_kw=dict(projection=submap), layout='constrained')
-    plt.suptitle('Image time: '+dt.datetime.strftime(submap.date.datetime, "%Y-%m-%d %H:%M:%S"))
-    fig.supxlabel('Solar X (arcsec)', y=0.015)
-    fig.supylabel('Solar Y (arcsec)', x=0.1)
-    cmap = plt.cm.get_cmap('cubehelix_r')
-    
-    for i, axi in enumerate(axes.flat):
-        new_dem = (dem[:,:,i*2]+dem[:,:,i*2+1])/2.
-        plotmap = Map(new_dem, submap.meta)
-        plotmap.plot(axes=axi,
-                     norm=colors.LogNorm(vmin=1e18, vmax=1e24),
-                     cmap='RdYlBu_r')
-        axi.grid(False)
-        
-        y = axi.coords[1]
-        y.set_axislabel(' ')
-        if i == 1 or i == 2 or i == 4 or i == 5 or i == 7 or i == 8:
-            y.set_ticklabel_visible(False)
-        x = axi.coords[0]
-        x.set_axislabel(' ')
-        if i < 6:
-            x.set_ticklabel_visible(False)
-    
-        axi.set_title(f'Log(T) = {logtemps[i*2]:.2f} - {logtemps[i*2+1+1]:.2f}')
-    
-    fig.tight_layout(pad=0.1, rect=[0, 0, 1, 0.98])
-    plt.colorbar(ax=axes.ravel().tolist(), label='$\mathrm{DEM\;[cm^{-5}\;K^{-1}]}$', 
-                 aspect=40, pad=0.02)
-    fig.savefig(f'{output_path}/dem_{frame_folder}.png', format='png', dpi=300, bbox_inches='tight')
-    fig.savefig(f'{output_path}/{frame_folder}/dem_tornado_{frame_folder}.pdf', format='pdf', bbox_inches='tight')
-    plt.close()
-
-
-
-
-else:
-    datetime_list = make_datetime_range(start_time=st,
-                                        end_time=et,
-                                        cadence=12) # range of frames
-    print(f'Datetimes list created from {datetime_list[0]} to {datetime_list[-1]}')
-    
-    for date_time_str in datetime_list:
-        target_datetime = dt.datetime.strptime(f'{date_time_str}', '%Y-%m-%d %H:%M:%S.%f')
-        
-        farray = []
-        for channel in passbands:
-            files         = sorted(glob.glob(f'{data_dir}/AIA/{channel}A/highres/lv15/*.fits'))
-            closest_index = find_closest_filename(files, channel, target_datetime)
-            aia_file      = files[closest_index]
-            farray.append(aia_file)
-        
-        maps = Map(farray)
-        
-        frame_folder = maps[0].meta['t_rec'][:-1].replace('-','').replace(':','')
-        err_arr_tit  = f'{output_path}/{frame_folder}/error_data_{frame_folder}.asdf'
-        dem_arr_tit  = f'{output_path}/{frame_folder}/dem_data_{frame_folder}.asdf'
-        
-        if os.path.exists(f'{output_path}/{frame_folder}'):
-            if os.path.exists(err_arr_tit) and os.path.exists(dem_arr_tit):
-                print(f'{frame_folder} exists and processed already.')
-                pass
-            else:
-                print(f'DEM file is missing from {frame_folder} !')
-                print('Process it manually.')
-                check_manually.append(date_time_str)
+    # ── Build the full image cube (nx,ny,nf) with padding for mis-sized maps ──
+    image_array = np.zeros((nx, ny, nf), dtype=np.float64)
+    for img in range(nf):
+        data = map_array[img].data
+        if data.shape != (nx, ny):
+            r = min(nx, data.shape[0])
+            c = min(ny, data.shape[1])
+            image_array[:r, :c, img] = data[:r, :c]
         else:
-            os.makedirs(f'{output_path}/{frame_folder}', exist_ok='True')
-            
-            print(f'\n====================\nProcessing {frame_folder} ...\n====================\n')
-            ## CENTRAL REGION
-            top_right   = SkyCoord(400*u.arcsec, 300*u.arcsec, frame=maps[0].coordinate_frame)
-            bottom_left = SkyCoord(30*u.arcsec, -70*u.arcsec, frame=maps[0].coordinate_frame)
-            submap_0    = maps[0].submap(bottom_left, top_right=top_right)
-            nx, ny      = submap_0.data.shape
-            nf          = len(maps)
-            map_arr     = []
-            err_array   = np.zeros([nx, ny, nf])
-            
-            for i, m in enumerate(maps):
-                # crop the region of interest
-                ## CENTRAL REGION
-                top_right   = SkyCoord(400*u.arcsec, 300*u.arcsec, frame=m.coordinate_frame)
-                bottom_left = SkyCoord(30*u.arcsec, -70*u.arcsec, frame=m.coordinate_frame)
-                submap      = m.submap(bottom_left, top_right=top_right)
-                map_arr.append(submap)
-                
-                num_pix = submap.data.size
-                err_array[:,:,i] = estimate_error(submap.data*(u.ct/u.pix), submap.wavelength, n_samples=num_pix)
-            
-            map_array = Map(map_arr[0], map_arr[1], map_arr[2],
-                            map_arr[3], map_arr[4], map_arr[5],
-                            sequence=True, sortby=None)
-            
-            map_arr_tit = f'{output_path}/{frame_folder}/prepped_data_{{index:03}}.fits'
-            map_array.save(map_arr_tit, overwrite='True')
-            
-            tree = {'err_array': err_array}
-            with asdf.AsdfFile(tree) as asdf_file:
-                asdf_file.write_to(err_arr_tit, all_array_compression='zlib')
-            
-            # # export prepped maps as asdf file
-            # files = sorted(glob.glob(f'{data_dir}/tornado_files/*.fits'))
-            # tree = {}
-            # for i, file in enumerate(files):
-            #     tree[f'image_array_{i}'] = Map(file)
-            # with asdf.AsdfFile(tree) as asdf_file:
-            #     asdf_file.write_to(f'{data_dir}/tornado_files/image_arrays_{frame_folder}.asdf', all_array_compression='zlib')
-            
-            print('Calculating DEM ...')
-            dem, edem, elogt, chisq, dn_reg, mlogt, logtemps = calculate_dem(map_array, err_array)
-            
-            tree = {'dem':dem, 'edem':edem, 'mlogt':mlogt, 'elogt':elogt, 'chisq':chisq, 'logtemps':logtemps}
-            with asdf.AsdfFile(tree) as asdf_file:
-                asdf_file.write_to(dem_arr_tit, all_array_compression='zlib')
-            
-            # Get a submap to have the scales and image properties
-            nt     = len(dem[0,0,:])
-            nt_new = int(nt/2)
-            nc, nr = 3, 3
-            plt.rcParams.update({'font.size':12, 'font.family':"DejaVu Sans",\
-                                 'font.sans-serif':"DejaVu Sans", 'mathtext.default':"regular"})
-            
-            fig, axes = plt.subplots(nrows=nr, ncols=nc, figsize=[12,12], sharex=True, sharey=True, subplot_kw=dict(projection=submap), layout='constrained')
-            plt.suptitle('Image time: '+dt.datetime.strftime(submap.date.datetime, "%Y-%m-%d %H:%M:%S"))
-            fig.supxlabel('Solar X (arcsec)', y=0.015)
-            fig.supylabel('Solar Y (arcsec)', x=0.1)
-            cmap = plt.cm.get_cmap('cubehelix_r')
-            
-            for i, axi in enumerate(axes.flat):
-                new_dem = (dem[:,:,i*2]+dem[:,:,i*2+1])/2.
-                plotmap = Map(new_dem, submap.meta)
-                plotmap.plot(axes=axi,
-                             norm=colors.LogNorm(vmin=1e18, vmax=1e24),
-                             cmap='RdYlBu_r')
-                axi.grid(False)
-                
-                y = axi.coords[1]
-                y.set_axislabel(' ')
-                if i == 1 or i == 2 or i == 4 or i == 5 or i == 7 or i == 8:
-                    y.set_ticklabel_visible(False)
-                x = axi.coords[0]
-                x.set_axislabel(' ')
-                if i < 6:
-                    x.set_ticklabel_visible(False)
-            
-                axi.set_title(f'Log(T) = {logtemps[i*2]:.2f} - {logtemps[i*2+1+1]:.2f}')
-            
-            fig.tight_layout(pad=0.1, rect=[0, 0, 1, 0.98])
-            plt.colorbar(ax=axes.ravel().tolist(), label='$\mathrm{DEM\;[cm^{-5}\;K^{-1}]}$', 
-                         aspect=40, pad=0.02)
-            fig.savefig(f'{doutput_path}/dem_{frame_folder}.png', format='png', dpi=300, bbox_inches='tight')
-            fig.savefig(f'{output_path}/{frame_folder}/dem_{frame_folder}.pdf', format='pdf', bbox_inches='tight')
-            plt.close()
-    
-    print('\n\nCheck the following folders manually:')
-    print(check_manually)
+            image_array[:, :, img] = data
+
+    # ── Allocate full-frame output arrays ─────────────────────────────────────
+    dem_full    = np.zeros((nx, ny, nt_dem), dtype=np.float64)
+    edem_full   = np.zeros((nx, ny, nt_dem), dtype=np.float64)
+    elogt_full  = np.zeros((nx, ny, nt_dem), dtype=np.float64)
+    chisq_full  = np.zeros((nx, ny),         dtype=np.float64)
+    dn_reg_full = np.zeros((nx, ny, nf),     dtype=np.float64)
+
+    # ── Tile loop ─────────────────────────────────────────────────────────────
+    x_starts   = list(range(0, nx, tile_size))
+    y_starts   = list(range(0, ny, tile_size))
+    total_tiles = len(x_starts) * len(y_starts)
+
+    with tqdm(total=total_tiles, desc='  DEM tiles', leave=False) as tile_pbar:
+        for x0 in x_starts:
+            x1 = min(x0 + tile_size, nx)
+            for y0 in y_starts:
+                y1 = min(y0 + tile_size, ny)
+
+                img_tile = image_array[x0:x1, y0:y1, :]   # view, no copy
+                err_tile = err_array[x0:x1, y0:y1, :]
+
+                dem_t, edem_t, elogt_t, chisq_t, dn_reg_t = dn2dem_pos(
+                    img_tile, err_tile, trmatrix, tresp_logt, temps, max_iter=15
+                )
+
+                # dn2dem_pos may return arrays as (ny, nx, nt)
+                # while our storage convention is (nx, ny, nt)
+
+                if dem_t.shape[:2] != (x1 - x0, y1 - y0):
+                    dem_t = np.transpose(dem_t, (1, 0, 2))
+
+                if edem_t.shape[:2] != (x1 - x0, y1 - y0):
+                    edem_t = np.transpose(edem_t, (1, 0, 2))
+
+                if elogt_t.shape[:2] != (x1 - x0, y1 - y0):
+                    elogt_t = np.transpose(elogt_t, (1, 0, 2))
+
+                if dn_reg_t.shape[:2] != (x1 - x0, y1 - y0):
+                    dn_reg_t = np.transpose(dn_reg_t, (1, 0, 2))
+
+                if chisq_t.shape != (x1 - x0, y1 - y0):
+                    chisq_t = chisq_t.T
+
+                dem_full   [x0:x1, y0:y1, :] = dem_t.clip(min=0)
+                edem_full  [x0:x1, y0:y1, :] = edem_t
+                elogt_full [x0:x1, y0:y1, :] = elogt_t
+                chisq_full [x0:x1, y0:y1]    = chisq_t
+                dn_reg_full[x0:x1, y0:y1, :] = dn_reg_t
+
+                tile_pbar.update(1)
+
+    return dem_full, edem_full, elogt_full, chisq_full, dn_reg_full, mlogt, logtemps
 
 
 
+# ── Collect all files ─────────────────────────────────────────────────────────
 
+mydate_fmt = mydate.replace('-', '_')
+all_files  = {}
+for channel in passbands:
+    all_files[channel] = sorted(
+        glob.glob(f'{data_dir}/AIA/{channel}A/highres/lv15/aia.lev15.{channel}A_{mydate_fmt}T*.fits')
+    )
 
+# ── Inspect total time window ─────────────────────────────────────────────────
 
+all_timestamps = []
+for channel, files in all_files.items():
+    for f in files:
+        try:
+            all_timestamps.append(parse_timestamp(f))
+        except ValueError:
+            pass
 
+all_timestamps.sort()
+total_start = all_timestamps[0]
+total_end   = all_timestamps[-1]
+total_dur   = total_end - total_start
 
+print(f'\n  Total data time window:')
+print(f'    Start : {total_start.strftime("%Y-%m-%d %H:%M:%S")}')
+print(f'    End   : {total_end.strftime("%Y-%m-%d %H:%M:%S")}')
+print(f'    Duration: {total_dur}\n')
+print(f'  This screen will process:')
+print(f'    Start : {chunk_start.strftime("%Y-%m-%d %H:%M:%S")}')
+print(f'    End   : {chunk_end.strftime("%Y-%m-%d %H:%M:%S")}')
+print(f'    Duration: {chunk_end - chunk_start}\n')
 
+# ── Group and filter to chunk ─────────────────────────────────────────────────
+# Tolerance MUST be < AIA cadence/2 (~6s). See group_files_by_timestep docstring.
+all_groups    = group_files_by_timestep(all_files, tolerance_seconds=6)
+chunk_groups  = [g for g in all_groups if chunk_start <= g['timestamp'] <= chunk_end]
 
+print(f'  Total timesteps in dataset : {len(all_groups)}')
+print(f'  Timesteps in this chunk    : {len(chunk_groups)}\n')
 
+# ── Load temperature response data once (re-used for every timestep) ─────────
 
+print('Loading AIA temperature response data...')
+tresp_logt, trmatrix, temps, mlogt, logtemps = load_tresp()
+print(f'  tresp loaded: {len(tresp_logt)} log-T points, '
+      f'{trmatrix.shape[1]} passbands\n')
 
+# ── Main loop ─────────────────────────────────────────────────────────────────
 
+check_manually = []
 
+with tqdm(total=len(chunk_groups), desc='Timesteps processed') as pbar:
+    for group in chunk_groups:
+        ts    = group['timestamp']
+        files = group['files']
+        print(f'\n── Timestep: {ts.strftime("%Y-%m-%dT%H:%M:%S")} '
+              f'({len(files)}/{len(passbands)} channels available) ──')
+        for key in files:
+            print(f'{key}: {files[key]}')
 
+        # 1. Check if ALL required passbands are present for this timestep
+        missing_channels = [cp for cp in passbands if cp not in files]
+        if missing_channels:
+            print(f'  [Timestep {ts}] Missing channels {missing_channels}, skipping.')
+            pbar.update(1)
+            continue
 
+        frame_folder = ts.strftime("%Y%m%d_%H%M%S")
+        err_arr_tit = f'{output_path}/{frame_folder}/error_data_{frame_folder}.asdf'
+        dem_arr_tit = f'{output_path}/{frame_folder}/dem_data_{frame_folder}.asdf'
 
+        # 2. Check if already processed
+        if os.path.exists(err_arr_tit) and os.path.exists(dem_arr_tit):
+            print(f'{frame_folder} already processed.')
+            pbar.update(1)
+            continue
 
+        print(f'\nProcessing {frame_folder} ...')
+        os.makedirs(f'{output_path}/{frame_folder}', exist_ok=True)
 
+        # 3. Load and Prep Maps
+        # Ensure files are loaded in the specific order of your passbands list
+        ordered_files = [files[pb] for pb in passbands]
+        maps = Map(ordered_files)
 
+        # Crop to ROI if coordinates are defined.
+        # Each map is cropped independently using its own coordinate frame so
+        # that WCS metadata (CRPIX, CRVAL, etc.) stays consistent in the saved
+        # FITS files.  All six channels are co-registered lv1.5 images, so the
+        # same arcsec box selects the identical physical region in every map.
+        if None not in (ROI_TOP, ROI_RIGHT, ROI_BOTTOM, ROI_LEFT):
+            cropped = []
+            for m in maps:
+                bl = SkyCoord(ROI_LEFT  * u.arcsec, ROI_BOTTOM * u.arcsec,
+                              frame=m.coordinate_frame)
+                tr = SkyCoord(ROI_RIGHT * u.arcsec, ROI_TOP    * u.arcsec,
+                              frame=m.coordinate_frame)
+                cropped.append(m.submap(bl, top_right=tr))
+            maps = cropped
+            print(f'  ROI crop applied: '
+                  f'[{ROI_LEFT}", {ROI_BOTTOM}"] -> [{ROI_RIGHT}", {ROI_TOP}"] '
+                  f'-> {maps[0].data.shape[1]}x{maps[0].data.shape[0]} px')
 
-# # passbands = [94, 131, 171, 193, 211, 335]
-# # nf = len(passbands)
-# channel = 335
-# single_frame = False
-# # target_datetime = '2024-05-14 17:36:05.0' # Your target date and time
+        # Get target dimensions from the first map
+        nx, ny = maps[0].data.shape
+        nf = len(maps)
+        err_array = np.zeros([nx, ny, nf])
+        valid_maps = []
 
-# # start_time = ...
-# # end_time   = ...
+        for i, m in enumerate(maps):
+            # If shapes mismatch, we need to handle it.
+            # Here we ensure the data matches nx, ny before inserting into the array.
+            if m.data.shape != (nx, ny):
+                print(f"Warning: Reshaping {m.wavelength} from {m.data.shape} to {(nx, ny)}")
+                # Use submap or simple padding/cropping to fix dimensions
+                # For DEM, it's safer to ensure they were registered correctly first
+                # If they are off by only 2 pixels, they likely weren't padded during 'register'
+                m_data = np.zeros((nx, ny))
+                min_x = min(nx, m.data.shape[0])
+                min_y = min(ny, m.data.shape[1])
+                m_data[:min_x, :min_y] = m.data[:min_x, :min_y]
+            else:
+                m_data = m.data
 
-# os.makedirs(f'{data_dir}/AIA/{channel}A/highres/lv1', exist_ok=True)
-# os.makedirs(f'{data_dir}/AIA/{channel}A/highres/lv15', exist_ok=True)
+            # Calculate error
+            err_array[:,:,i] = estimate_error(m_data * (u.ct/u.pix), m.wavelength, n_samples=m_data.size)
+            valid_maps.append(m)
 
+        # 4. Create MapSequence and Save
+        map_array = Map(valid_maps, sequence=True)
+        map_arr_tit_pattern = f'{output_path}/{frame_folder}/prepped_data_{{index:03}}.fits'
+        map_array.save(map_arr_tit_pattern, overwrite=True)
 
-# def extract_datetime(filename):
-#     """
-#     Function to extract the datetime from a filename.
-#     """
-#     # Split the filename and extract the date and time parts
-#     date_time_part = filename.split('/')[-1]                            # Extracts '2024_05_14T18_49_59.12'
-#     date_part = date_time_part.split('T')[0].split(f'{channel}A_')[-1]  # Extracts '2024_05_14'
-#     time_part = date_time_part.split('T')[1].split('Z')[0]              # Extracts '18_49_59.12'
-    
-#     # Reformat date and time to standard datetime format
-#     date_str = date_part.replace('_', '-')  # '2024-05-14'
-#     time_str = time_part.replace('_', ':')  # '18:49:59.12'
-    
-#     # Combine date and time and convert to datetime object
-#     return datetime.strptime(f'{date_str} {time_str}', '%Y-%m-%d %H:%M:%S.%f')
+        # Save error array
+        with asdf.AsdfFile({'err_array': err_array}) as af:
+            af.write_to(err_arr_tit, all_array_compression='zlib')
 
+        # 5. Calculate and Save DEM
+        print('Calculating DEM (tiled)...')
+        dem, edem, elogt, chisq, dn_reg, mlogt, logtemps = calculate_dem_tiled(
+            map_array, err_array,
+            tresp_logt, trmatrix, temps, mlogt, logtemps,
+            tile_size=512
+        )
 
-# def find_closest_filename(filenames, target_datetime):
-#     """
-#     Function to find the index of the filename with the closest datetime to a given target.
-#     """
-#     closest_index = None
-#     min_time_diff = None
-    
-#     for i, filename in enumerate(filenames):
-#         file_datetime = extract_datetime(filename)
-#         # print(type(file_datetime))
-#         # print(type(target_datetime))
-        
-#         # Calculate the absolute time difference
-#         time_diff = abs(file_datetime - target_datetime)
-        
-#         # Update the closest file if this one is closer
-#         if min_time_diff is None or time_diff < min_time_diff:
-#             min_time_diff = time_diff
-#             closest_index = i
-    
-#     return closest_index
+        tree = {
+            'dem': dem,
+            'edem': edem,
+            'mlogt': mlogt,
+            'elogt': elogt,
+            'chisq': chisq,
+            'logtemps': logtemps
+        }
+        with asdf.AsdfFile(tree) as af:
+            af.write_to(dem_arr_tit, all_array_compression='zlib')
 
-
-# def extract_datetime_v1(filename):
-#     import re
-#     # Regular expression to capture the date-time part of the filename
-#     pattern = r'_(\d{4}_\d{2}_\d{2}T\d{2}_\d{2}_\d{2}\.\d{2})Z'
-    
-#     # Search the filename for the pattern
-#     match = re.search(pattern, filename)
-    
-#     if match:
-#         # Replace underscores with colons and hyphens to format as a standard date-time string
-#         datetime_str = match.group(1).replace('_', '-', 2).replace('_', ':').replace('T', ' ')
-#         return datetime_str
-#     else:
-#         return []  # Return empty list if no match found
-
-
-# def do_process(date_time_str):
-#     target_datetime = datetime.strptime(f'{date_time_str}', '%Y-%m-%d %H:%M:%S.%f')
-    
-#     # find the file index with the nearest datetime to the given one above
-#     files = sorted(glob.glob(f'{data_dir}/AIA/{channel}A/highres/lv1/*.fits'))
-    
-#     closest_index = find_closest_filename(files, target_datetime)
-    
-#     print(f'\nclosest index to the given date: {closest_index}\n')
-    
-#     # load the file as a sunpy map
-#     aia_file = files[closest_index]
-    
-#     output_filename = f'{data_dir}/AIA/{channel}A/highres/lv15/{aia_file.split("/")[-1].replace("lev1", "lev15")}'
-#     if os.path.exists(output_filename):
-#         print(f'{output_filename} exists and processed already.')
-#         pass
-#     else:
-#         m = Map(aia_file)
-#         print(f'Upgrade AIA {channel}A {aia_file.split("/")[-1]} map to lv1.5 and deconvolve with PSF ..\n')
-        
-#         # # crop the region of interest
-#         # top_right   = SkyCoord(-840*u.arcsec, 420*u.arcsec, frame=m.coordinate_frame)
-#         # bottom_left = SkyCoord(-920*u.arcsec, 300*u.arcsec, frame=m.coordinate_frame)
-#         # submap      = m.submap(bottom_left, top_right=top_right)
-#         # print(f'submap shape: {submap.data.shape}')
-        
-#         psf                      = aiapy.psf.psf(m.wavelength)
-#         aia_map_deconvolved      = aiapy.psf.deconvolve(m, psf=psf)
-#         print('Deconvolution is finished')
-#         aia_map_updated_pointing = update_pointing(aia_map_deconvolved)
-#         print('Updating pointing is finished')
-#         aia_map_registered       = register(aia_map_updated_pointing)
-#         print('Registration is finished')
-#         aia_map_corrected        = correct_degradation(aia_map_registered)
-#         print('Degradation correction is finished')
-#         aia_map_norm             = aia_map_corrected / aia_map_corrected.exposure_time
-#         print('Exposure time correction is finished')
-        
-#         aia_map_norm.save(output_filename, filetype='auto', overwrite=True) # overwrite bc I already have lv1.5 but without PSF deconvolve.
-        
-#         print('Images prepared and exporeted with the region of interest selected')
-
-# # ====================================================================================================
-# # START FROM HERE ...
-# # ====================================================================================================
-
-# # datetime_list = []
-# # if single_frame:
-# #     datetime_list.append(target_datetime) 
-# # else:
-# #     files = sorted(glob.glob(f'{data_dir}/AIA/{channel}A/highres/lv1/*.fits'))
-# #     for file in files:
-# #         filename = file.split('/')[-1]
-# #         datetime_list.append(extract_datetime(filename))
-
-# # if len(datetime_list) == 1:
-# #     date_time_str = datetime_list[0]
-# # else:
-# #     for date_time_str in datetime_list:
-# #         print(f'Doing frame {date_time_str} now ..')
-# #         do_process(date_time_str)
-
-# datetime_list = []
-# if single_frame:
-#     datetime_list.append(target_datetime) 
-# else:
-#     files = sorted(glob.glob(f'{data_dir}/AIA/{channel}A/highres/lv1/*.fits'))
-#     for file in files:
-#         filename = file.split('/')[-1]
-#         datetime_list.append(extract_datetime_v1(filename))
-
-# if len(datetime_list) == 1:
-#     date_time_str = datetime_list[0]
-# else:
-#     for date_time_str in datetime_list:
-#         print(f'Doing frame {date_time_str} now ..')
-#         do_process(date_time_str)
-
-
+        print(f'Step {frame_folder} finished.')
+        pbar.update(1)
