@@ -39,15 +39,26 @@ def _track_number(track_id):
 
 
 def _plot_all_slits(all_kin, quantity, ylabel, title, errorbar_every=1,
-                    show_title=True, savepath=None, dpi=300):
-    """Overlay one kinematic quantity across slits, ordered by slit number."""
+                    show_title=True, savepath=None, dpi=300, annotate_scalar=False):
+    """Overlay one kinematic quantity across slits, ordered by slit number.
+
+    With annotate_scalar each legend entry also shows that track's time-averaged
+    value +/- mean SEM.
+    """
     fig, ax = plt.subplots(figsize=[9, 5])
     ordered = sorted(all_kin.items(), key=lambda kv: _track_number(kv[0]))
     for slit_id, kin in ordered:
         x = np.asarray(kin['x_time_num'])
         idx = np.arange(len(x))[::errorbar_every]
+        if annotate_scalar:
+            unit = kin.get(f'{quantity}_unit', '')
+            m = np.nanmean(kin[f'{quantity}_mean'])
+            s = np.nanmean(kin[f'{quantity}_sem'])
+            label = f'{slit_id}: {m:.1f} ± {s:.1f} {unit}'
+        else:
+            label = slit_id
         ax.errorbar(x[idx], kin[f'{quantity}_mean'][idx], yerr=kin[f'{quantity}_sem'][idx],
-                    fmt='o-', ms=3, lw=1.2, capsize=2, label=slit_id)
+                    fmt='o-', ms=3, lw=1.2, capsize=2, label=label)
     ax.axhline(0, color='black', lw=0.8, alpha=0.5)
     ax.xaxis_date()
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
@@ -61,14 +72,17 @@ def _plot_all_slits(all_kin, quantity, ylabel, title, errorbar_every=1,
     return fig, ax
 
 
-def plot_all_slit_speeds(all_kin, errorbar_every=1, show_title=True, savepath=None, dpi=300):
+def plot_all_slit_speeds(all_kin, errorbar_every=1, show_title=True, savepath=None, dpi=300,
+                         annotate_scalar=False):
     return _plot_all_slits(all_kin, 'speed', 'Speed [km/s]', 'Speed along slits',
-                           errorbar_every, show_title, savepath, dpi)
+                           errorbar_every, show_title, savepath, dpi, annotate_scalar)
 
 
-def plot_all_slit_accelerations(all_kin, errorbar_every=1, show_title=True, savepath=None, dpi=300):
+def plot_all_slit_accelerations(all_kin, errorbar_every=1, show_title=True, savepath=None, dpi=300,
+                                annotate_scalar=False):
     return _plot_all_slits(all_kin, 'acceleration', r'Acceleration [m/s$^2$]',
-                           'Acceleration along slits', errorbar_every, show_title, savepath, dpi)
+                           'Acceleration along slits', errorbar_every, show_title, savepath, dpi,
+                           annotate_scalar)
 
 
 # ----------------------------------------------------------------------------- #
