@@ -14,9 +14,10 @@ from aiapy.calibrate import register, update_pointing
 from astropy.visualization import ImageNormalize, SqrtStretch
 from tqdm import tqdm
 
-mydate = '2025-10-06'
+mydate = '2026-01-18'
 data_dir = '/home/mnedal/data'
-passbands = [94, 131, 171, 193, 211, 304, 335]
+passbands = [94, 131, 171, 193, 211, 304]
+# passbands = [94, 131, 171, 193, 211, 304, 335]
 
 
 def do_process(aia_file):
