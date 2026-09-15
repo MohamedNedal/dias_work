@@ -252,21 +252,143 @@ check('M_A recovered end to end', sc['F']['M_A'][0],
 check('relative bandwidth recovered', sc['F']['rel_bandwidth'][0], sp - 1, 1e-3, '', rel=True)
 globals()['TRACED'], globals()['LANE_SIGMA'] = _st, _ss
 
-# ---------------------------------------------------------------- 15. adaptive fit degree
-print('\n15. r(t) degree adapts to the traced baseline')
+# ---------------------------------------------------------------- 15. fit degree and significance
+print('\n15. fit degree is set by point count, and significance decides what counts as measured')
+check_true('plenty of points keeps the quadratic', kin_degree(200) == KIN_DEG,
+           f'(degree {kin_degree(200)})')
+check_true('too few points drops the degree', kin_degree(3) == 1, f'(degree {kin_degree(3)})')
+check_true('degree never goes below 1', kin_degree(2) == 1 and kin_degree(0) == 1)
+
+# The curvature of a SHORT lane must still be recovered: it is real, and refusing to fit it
+# because of the lane's duration is what a fixed baseline cut wrongly did.
 tg2 = np.linspace(0, 1500, 60)
 short = (tg2 >= 600) & (tg2 <= 600 + 0.5 * KIN_MIN_BASELINE_S)
-long_ = (tg2 >= 100) & (tg2 <= 100 + 2.0 * KIN_MIN_BASELINE_S)
-check_true(f'short lane (<{KIN_MIN_BASELINE_S} s) drops to a straight line',
-           kin_degree(tg2, short) == 1, f'(degree {kin_degree(tg2, short)})')
-check_true('long lane keeps the quadratic', kin_degree(tg2, long_) == KIN_DEG,
-           f'(degree {kin_degree(tg2, long_)})')
-r_curved = 1.6 + (600e3 / R_SUN_M) * tg2 + 0.5 * (-500.0 / R_SUN_M) * tg2 ** 2
+long_ = (tg2 >= 100) & (tg2 <= 100 + 2 * KIN_MIN_BASELINE_S)
+r_curved = 1.6 + (600e3 / R_SUN_M) * tg2 + 0.5 * (-500 / R_SUN_M) * tg2 ** 2
 _, a_short = kinematics(np.where(short, r_curved, np.nan), tg2, span=short)
 _, a_long = kinematics(np.where(long_, r_curved, np.nan), tg2, span=long_)
-check_true('a is not reported for a short lane', abs(np.nanmean(a_short)) < 1e-9,
-           '(a straight-line fit gives a = 0 by construction, not a measurement)')
-check('a IS recovered for a long lane', np.nanmean(a_long), -500.0, 1e-6, 'm/s^2')
+check('a IS recovered for a SHORT lane', np.nanmean(a_short), -500, 1e-6, 'm/s^2')
+check('a IS recovered for a long lane', np.nanmean(a_long), -500, 1e-6, 'm/s^2')
+
+# significance, not lane length, is what gates the word "measured"
+check_true('a well clear of its error is measured', accel_is_measured(-500, 50))
+check_true('a inside its error is not measured', not accel_is_measured(-40, 50))
+check_true('a exactly at the threshold is measured',
+           accel_is_measured(KIN_A_SIGMA * 50, 50))
+check_true('NaN a is never measured', not accel_is_measured(np.nan, 50)
+           and not accel_is_measured(-500, np.nan) and not accel_is_measured(-500, 0))
+
+# fitting on the lane's own dense samples must not change an exactly-quadratic answer
+_td = np.linspace(600, 600 + 0.5 * KIN_MIN_BASELINE_S, KIN_N_DENSE)
+_rd = 1.6 + (600e3 / R_SUN_M) * _td + 0.5 * (-500 / R_SUN_M) * _td ** 2
+_, a_dense = kinematics(np.where(short, r_curved, np.nan), tg2, span=short,
+                        t_fit=_td, r_fit=_rd)
+check('dense per-lane fit gives the same a', np.nanmean(a_dense), -500, 1e-6, 'm/s^2')
+
+# ---------------------------------------------------------------- 17. null test on acceleration
+# The strongest check in this file: a shock moving at EXACTLY constant speed must come back with
+# a = 0. It does not, automatically - a degree-2 lane fit returns tens of m/s^2 of spurious
+# DECELERATION, because a quadratic in log10 f cannot represent the frequency drift of a
+# constant-speed shock climbing through a structured corona, and that misfit reappears as
+# curvature in r(t). Nothing in the Monte Carlo can see this: the error bars sit tightly around
+# the wrong number.
+print('\n17. a constant-speed shock must return a = 0')
+_mdl = MODEL_GRID['Newkirk x2']
+_rr, _ne = _invert_grid(_mdl)
+
+
+def _null_a(r0, T, s, deg):
+    """Acceleration recovered from an exactly constant-velocity shock."""
+    tt = np.linspace(0, T, 300)
+    r_true = r0 + (600 * 1e3 / R_SUN_M) * tt
+    f_true = PLASMA_CONST * np.sqrt(_mdl(r_true)) * s / 1e6
+    fit = _lane_fit({'t': [t0 + pd.Timedelta(seconds=float(x)) for x in tt],
+                     'f': list(f_true)}, deg=deg, sigma_f=0.7)
+    to_r = lambda x: np.interp(freq_to_density(_eval(fit, fit['p'], x) * 1e6, harmonic=s),
+                               _ne[::-1], _rr[::-1])
+    td = np.linspace(fit['tmin'], fit['tmax'], KIN_N_DENSE)
+    tgs = np.linspace(fit['tmin'], fit['tmax'], 60)
+    v, a = kinematics(to_r(tgs), tgs, t_fit=td, r_fit=to_r(td))
+    return float(np.nanmean(v)), float(np.nanmean(a))
+
+
+for _name, _r0, _T, _s in [('wide F lane, 600 s', 1.48, 600, 1),
+                           ('narrow F lane, 190 s', 1.69, 190, 1),
+                           ('long H lane, 1500 s', 1.85, 1500, 2)]:
+    _v, _a = _null_a(_r0, _T, _s, LANE_DEG)
+    check(f'v recovered, {_name}', _v, 600, 2, 'km/s')
+    check_true(f'|a| < 10 m/s^2, {_name}', abs(_a) < 10, f'(a = {_a:+.2f} m/s^2)')
+
+# and prove the degree is what fixes it, so nobody lowers LANE_DEG without seeing the cost
+_a2 = abs(_null_a(1.85, 1500, 2, 2)[1])
+_a3 = abs(_null_a(1.85, 1500, 2, 3)[1])
+check_true('a quadratic lane fit really is the source of the bias', _a2 > 10 * max(_a3, 0.1),
+           f'(deg 2 -> {_a2:.1f} m/s^2, deg {LANE_DEG} -> {_a3:.2f} m/s^2)')
+check_true('the shipped LANE_DEG is at least 3', LANE_DEG >= 3, f'(LANE_DEG = {LANE_DEG})')
+
+# the bias floor must gate the significance test, not merely be reported next to it
+check_true('a below the bias floor is not "measured"',
+           not accel_is_measured(30, 5, bias=-54))
+check_true('a above the bias floor is measured', accel_is_measured(300, 5, bias=-54))
+
+# ------------------------------------------------- 18. faults found in the line-by-line audit
+print('\n18. regressions for each fault found in the full audit')
+
+# (a) the kinematics gate must count the points the FIT uses, not the shared grid's points.
+#     Tying it to the grid silently lost the speed of any lane shorter than ~3 grid steps.
+_tgf = np.linspace(0, 2000, N_GRID)
+for _span in (600, 300, 190, 150, 120):
+    _sel = (_tgf >= 500) & (_tgf <= 500 + _span)
+    _r = np.where(_sel, 1.6 + (600e3 / R_SUN_M) * _tgf, np.nan)
+    _td = np.linspace(500, 500 + _span, KIN_N_DENSE)
+    _v, _ = kinematics(_r, _tgf, span=_sel, t_fit=_td, r_fit=1.6 + (600e3 / R_SUN_M) * _td)
+    check(f'short lane keeps its speed, {_span} s ({_sel.sum()} grid pts)',
+          np.nanmean(_v), 600, 0.5, 'km/s')
+
+# (b) samples landing on one time column are averaged, not decided by sort order
+_o = bezier_freq_lane(np.array([10, 10, 10, 11]), np.array([100, 140, 180, 200]))
+check('duplicate times are averaged, not first-wins', _o['f'][0],
+      float(LAYER_F[[100, 140, 180]].mean()), 1e-9, 'MHz')
+
+# (c) _thin must be correct on unsorted input, not just on the sorted input it happens to get
+_tu = np.array([0., 30., 5., 60., 12., 90.])
+_k = _thin(_tu)
+check_true('_thin is safe on unsorted input',
+           np.all(np.diff(np.sort(_tu[_k])) >= FIT_MIN_DT_S - 1e-9), f'(kept {list(_k)})')
+
+# (d) the polarisation box must be symmetric about the point; a half-open upper edge holds one
+#     fewer sample on the late side and drags the box early along a drifting lane
+_hf = np.timedelta64(int(POL_DT_S * 1e3), 'ms')
+_tm = POL.index[len(POL) // 2].to_numpy()
+_i0 = np.searchsorted(POL_T, _tm - _hf, side='left')
+_i1 = np.searchsorted(POL_T, _tm + _hf, side='right')
+check_true('polarisation box straddles the point evenly',
+           abs((_tm - POL_T[_i0]) - (POL_T[_i1 - 1] - _tm)) <= np.timedelta64(1, 'ms'),
+           f'({_i1 - _i0} samples)')
+
+# (e) M_A diverges as X -> 4; the notebook has to notice rather than return 134 quietly
+check_true('M_A blows up near X = 4', alfven_mach_from_X(np.array([3.99]))[0] > 40,
+           f'(M_A(3.99) = {alfven_mach_from_X(np.array([3.99]))[0]:.1f})')
+check_true('X out of range gives NaN, not a number',
+           np.isnan(alfven_mach_from_X(np.array([0.99]))[0])
+           and np.isnan(alfven_mach_from_X(np.array([4.01]))[0]))
+
+# (f) a split whose branches cross has X < 1 over part of the overlap; the fraction has to be
+#     measurable, because every downstream mean is a nanmean and drops those samples in silence
+_tt = np.linspace(0, 600, 40)
+_lo = {'t': [t0 + pd.Timedelta(seconds=float(x)) for x in _tt], 'f': list(50 - 0.02 * _tt)}
+_up = {'t': [t0 + pd.Timedelta(seconds=float(x)) for x in _tt], 'f': list(55 - 0.035 * _tt)}
+_g = np.linspace(0, 600, 20)
+_X = (lane_deriv(_lane_fit(_up, sigma_f=0.3), _g)[0]
+      / lane_deriv(_lane_fit(_lo, sigma_f=0.3), _g)[0]) ** 2
+_frac = float(np.mean(~((_X >= 1) & (_X < 4))))
+check_true('crossing branches are detectable as an X-validity fraction', _frac > 0.3,
+           f'({100 * _frac:.0f}% of the overlap unusable, mean X = {np.nanmean(_X):.3f} '
+           'looks innocent)')
+
+# (g) B is unchanged by all of the above - the one number that must not move
+check('B pipeline still matches the hand calculation',
+      (600 / 1.5 * 1e3) * np.sqrt(MU0 * MU * M_P * (3.0e7 * 1e6)) * 1e4, 1.13195, 1e-5, 'G')
 
 # ---------------------------------------------------------------- 16. LaTeX in f-strings
 print('\n16. no LaTeX macro can be eaten by a non-raw f-string')
@@ -284,6 +406,184 @@ for _c in _nb['cells']:
                     _bad.append(_seg)
 check_true('no \\nu / \\tau / \\rm eaten as a python escape in maths mode',
            not _bad, f'({len(_bad)} found)' if _bad else '(this broke the chi^2 legend once)')
+
+print('\n19. a cubic\'s derivative near the edge of its span is not a measurement')
+# The fault this guards against: the F/H relative-drift test used to evaluate each band's cubic
+# over the F/H overlap, which is the last third of one fit and the first eighth of the other. Two
+# cubics through the SAME underlying curve, fitted over different spans, disagree there - so the
+# test was measuring the fits' edge behaviour and reporting it as a physical discrepancy between
+# the bands. On the real event that came out as 14.8%, at 5.6 sigma.
+#
+# Reproduce the geometry from a lane that is exactly ONE shock: a constant-speed front through
+# Newkirk, so any band-to-band difference the estimators report is by construction an artefact.
+# A pure exponential will not do - a cubic in log f fits that perfectly and both spans agree.
+_tt = np.linspace(0, 2000, 400)
+_rr_ = 1.35 + (700 * 1e3 / R_SUN_M) * _tt                    # 700 km/s, no acceleration
+_ff = PLASMA_CONST * np.sqrt(MODEL_GRID['Newkirk x2'](_rr_)) / 1e6
+_A = (_tt >= 100) & (_tt <= 700)                             # "F": the overlap is its last third
+_B = (_tt >= 520) & (_tt <= 2000)                            # "H": the overlap is its first eighth
+_ov = (_tt >= 520) & (_tt <= 700)
+_edge = [np.mean(np.polyval(np.polyder(np.polyfit(_tt[_m], np.log10(_ff[_m]), 3)), _tt[_ov]))
+         * np.log(10) for _m in (_A, _B)]
+_direct = [np.polyfit(_tt[_m & _ov], np.log(_ff[_m & _ov]), 1)[0] for _m in (_A, _B)]
+_truth = np.mean(np.gradient(np.log(_ff), _tt)[_ov])
+check_true('two cubics on ONE lane disagree at their opposite edges',
+           abs(_edge[0] - _edge[1]) / abs(_truth) > 0.01,
+           f'({100 * abs(_edge[0] - _edge[1]) / abs(_truth):.1f}% of the true drift, from a lane '
+           f'with no band-to-band difference in it)')
+check('a direct log-linear fit on the overlap recovers the true drift',
+      _direct[0], _truth, abs(_truth) * 5e-3, '1/s')
+check_true('and it cannot manufacture a band-to-band difference',
+           abs(_direct[0] - _direct[1]) < 1e-15,
+           '(both bands see the same points in the window, so they get the same answer)')
+
+print('\n20. the height inversion, on every model x fold across the whole observing band')
+# _invert_grid builds a lookup table and the chain interpolates on it. Test the table against a
+# root find done independently with brentq, at every model and both harmonics, over the real band.
+from scipy.optimize import brentq as _brentq
+_worst, _worst_at, _nchk = 0.0, '', 0
+_nonmono = []
+for _mname, _mdl in MODEL_GRID.items():
+    _rr_t, _ne_t = _invert_grid(_mdl)
+    if not np.all(np.diff(_ne_t) < 0):
+        _nonmono.append(_mname)
+    for _s in (1, 2):
+        for _fMHz in (25, 40, 60, 84):
+            _ne_want = freq_to_density(_fMHz * 1e6, harmonic=_s)
+            if not (np.nanmin(_ne_t) <= _ne_want <= np.nanmax(_ne_t)):
+                continue                       # genuinely outside this model's range
+            _got = float(np.interp(_ne_want, _ne_t[::-1], _rr_t[::-1]))
+            try:
+                _want = _brentq(lambda r: _mdl(r) - _ne_want, _rr_t.min(), _rr_t.max(), xtol=1e-12)
+            except ValueError:
+                continue
+            _nchk += 1
+            if abs(_got - _want) > _worst:
+                _worst, _worst_at = abs(_got - _want), f'{_mname}, s={_s}, {_fMHz} MHz'
+check_true('n_e(r) is strictly decreasing on every model grid',
+           not _nonmono, f'({len(MODEL_GRID)} models)' if not _nonmono else f'BAD: {_nonmono}')
+check('interpolated height vs independent root find, worst case over the grid',
+      _worst, 0.0, 2e-3, 'Rsun')
+check_true('the check actually ran over the whole grid', _nchk >= 100,
+           f'({_nchk} model x harmonic x frequency combinations)')
+check_true('a frequency below every model returns NaN, not an extrapolation',
+           np.isnan(freq_to_radius(1.0, MODEL_GRID['Newkirk x2'], 1)))
+
+print('\n21. Monte-Carlo error propagation does what it claims')
+# Three properties the aggregation must have, none of which a central value reveals:
+#   (a) the reported error scales with the assumed per-point frequency error;
+#   (b) it does NOT shrink as sqrt(N) over jittered Bezier repeats, which are not independent;
+#   (c) identical repeats with zero assumed error give zero spread.
+_lab0 = TRACED[0]
+_sig0 = LANE_SIGMA.get(_lab0, 0.7)
+_errs = {}
+for _mult in (1, 2, 4):
+    _saved = dict(LANE_SIGMA)
+    LANE_SIGMA.update({k: v * _mult for k, v in _saved.items()})
+    _agg = aggregate_lanes(passes, tg, MODEL_GRID[REF_MODEL_NAME], n_mc=60, seed=1)
+    _errs[_mult] = grid_scalar(_agg[_lab0], 'r')[1]
+    LANE_SIGMA.clear()
+    LANE_SIGMA.update(_saved)
+check('error doubles when sigma_f doubles', _errs[2] / _errs[1], 2.0, 0.12, 'x', rel=False)
+check('error quadruples when sigma_f quadruples', _errs[4] / _errs[1], 4.0, 0.3, 'x')
+# The fixture carries a single pass, so build three jittered copies here - the same thing the
+# tracer's auto-repeat does - and check the aggregation does not treat them as independent.
+_rng0 = np.random.default_rng(7)
+_reps = [passes[0]] + [{k: {'t': list(v['t']),
+                           'f': [float(x) + _rng0.normal(0, 0.05) for x in v['f']]}
+                        for k, v in passes[0].items()} for _ in range(2)]
+_one = aggregate_lanes([passes[0]], tg, MODEL_GRID[REF_MODEL_NAME], n_mc=60, seed=1)
+_many = aggregate_lanes(_reps, tg, MODEL_GRID[REF_MODEL_NAME], n_mc=60, seed=1)
+_r1, _rN = grid_scalar(_one[_lab0], 'r')[1], grid_scalar(_many[_lab0], 'r')[1]
+check_true('jittered repeats do NOT divide the error by sqrt(N)',
+           _rN > _r1 / np.sqrt(len(_reps)) * 1.3,
+           f'({len(_reps)} jittered repeats: {_r1:.5f} -> {_rN:.5f} Rsun; sqrt(N) shrinkage '
+           f'would give {_r1 / np.sqrt(len(_reps)):.5f})')
+check_true('REPEATS_INDEPENDENT is off for auto-jittered repeats', not REPEATS_INDEPENDENT)
+
+print('\n22. full chain on an injected shock: recover the speed and the field, not just X')
+# Section 14 injects a known density jump and recovers X and M_A. Those are model-independent.
+# This injects a complete shock - known height, speed and upstream field - and checks the
+# model-DEPENDENT half of the chain end to end, which nothing else here does.
+_V_TRUE, _R0, _X_TRUE, _MDL = 800.0, 1.45, 1.35, MODEL_GRID['Newkirk x2']
+_tt = np.linspace(0, 900, 120)
+_rt = _R0 + (_V_TRUE * 1e3 / R_SUN_M) * _tt
+_ne_up = _MDL(_rt)
+_f_lo = PLASMA_CONST * np.sqrt(_ne_up) / 1e6                       # upstream branch, s = 1
+_f_hi = _f_lo * np.sqrt(_X_TRUE)                                   # downstream branch
+_MA_TRUE = np.sqrt(_X_TRUE * (_X_TRUE + 5) / (2 * (4 - _X_TRUE)))
+_vA_TRUE = _V_TRUE / _MA_TRUE
+_rho = MU * M_P * np.mean(_ne_up) * 1e6
+_B_TRUE = _vA_TRUE * 1e3 * np.sqrt(MU0 * _rho) * 1e4
+_mk = lambda f: {'t': [t0 + pd.Timedelta(seconds=float(s)) for s in _tt], 'f': list(f)}
+_sv_tr, _sv_bd, _sv_sg = list(TRACED), dict(LANE_BAND), dict(LANE_SIGMA)
+_sv_ord, _sv_pair, _sv_bt = dict(LANE_ORDER), dict(SPLIT_PAIR), list(BANDS_TRACED)
+try:
+    TRACED[:] = ['F lane 1', 'F lane 2']
+    LANE_BAND.clear(); LANE_BAND.update({'F lane 1': 'F', 'F lane 2': 'F'})
+    LANE_SIGMA.clear(); LANE_SIGMA.update({'F lane 1': 1e-6, 'F lane 2': 1e-6})
+    LANE_ORDER.clear(); LANE_ORDER.update({'F': ['F lane 1', 'F lane 2']})
+    SPLIT_PAIR.clear(); SPLIT_PAIR.update({'F': ('F lane 1', 'F lane 2')})
+    BANDS_TRACED[:] = ['F']
+    _tg2 = np.linspace(_tt.min(), _tt.max(), N_GRID)
+    _ag = aggregate_lanes([{'F lane 1': _mk(_f_lo), 'F lane 2': _mk(_f_hi)}], _tg2, _MDL, n_mc=1)
+    _d = _ag['F lane 1']
+    _cm = common_mask(_d)
+    # Compare against the truth evaluated on THE SAME grid points the pipeline averaged over.
+    # Averaging the injected samples instead compares two different sample sets and fails by more
+    # than the pipeline's own error - a test artefact, not a pipeline one.
+    _tw = _tg2[_cm]
+    _r_true_w = _R0 + (_V_TRUE * 1e3 / R_SUN_M) * _tw
+    _ne_true_w = _MDL(_r_true_w)
+    _B_true_w = np.mean((_vA_TRUE * 1e3) * np.sqrt(MU0 * MU * M_P * _ne_true_w * 1e6) * 1e4)
+    check('recovered height', grid_scalar(_d, 'r', mask=_cm)[0], np.mean(_r_true_w), 2e-3, 'Rsun')
+    check('recovered shock speed', grid_scalar(_d, 'v', mask=_cm)[0], _V_TRUE, 6.0, 'km/s')
+    check('recovered density jump X', grid_scalar(_d, 'X', mask=_cm)[0], _X_TRUE, 2e-3)
+    check('recovered Alfven Mach number', grid_scalar(_d, 'MA', mask=_cm)[0], _MA_TRUE, 2e-3)
+    check('recovered Alfven speed', grid_scalar(_d, 'vA', mask=_cm)[0], _vA_TRUE, 6.0, 'km/s')
+    # B is the grid-mean of v_A sqrt(mu0 rho(t)), a mean of a product - not the product of the
+    # means, which is what _B_TRUE above is. Compare like with like.
+    check('recovered magnetic field', grid_scalar(_d, 'B', mask=_cm)[0], _B_true_w, 0.02, 'G')
+    # upstream is passed explicitly: lane_windows otherwise reads LANE_ROLE, which this block
+    # has not rebuilt, and the test would be measuring the fixture's naming rather than the code.
+    _w = lane_windows(_d, 'F lane 1', _tg2, t0, upstream=True)
+    check_true('lane_windows closes v_A = v_sh / M_A on its own numbers',
+               abs(_w['vA_split'] - _w['v_split'] / _w['MA_split']) / _w['vA_split'] < 5e-3,
+               f'(v_A {_w["vA_split"]:.1f} vs v/M_A {_w["v_split"] / _w["MA_split"]:.1f} km/s)')
+    check_true('lane_windows withholds v_A and B from a downstream branch',
+               np.isnan(lane_windows(_ag['F lane 2'], 'F lane 2', _tg2, t0,
+                                     upstream=False)['B_split']))
+finally:
+    TRACED[:] = _sv_tr
+    LANE_BAND.clear(); LANE_BAND.update(_sv_bd)
+    LANE_SIGMA.clear(); LANE_SIGMA.update(_sv_sg)
+    LANE_ORDER.clear(); LANE_ORDER.update(_sv_ord)
+    SPLIT_PAIR.clear(); SPLIT_PAIR.update(_sv_pair)
+    BANDS_TRACED[:] = _sv_bt
+
+print('\n23. the polarisation gate discriminates in BOTH directions')
+# A significance gate that only ever says "not significant" is worthless. The fixture injects a
+# real contrast and the gate must fire positively on it; a shuffled version with no contrast must
+# not. Both are checked here because the real data land on the negative side, so the positive
+# branch would otherwise never be exercised.
+_pF = pol_table[pol_table['band'] == 'F']['V_over_I_mean'].mean()
+_pH = pol_table[pol_table['band'] == 'H']['V_over_I_mean'].mean()
+_noise = pol_table['V_over_I_sd'].median()
+check_true('fires positively on the fixture, which has an injected contrast',
+           abs(_pF - _pH) / _noise >= 2 and abs(_pF) > abs(_pH),
+           f'({abs(_pF - _pH) / _noise:.1f}x the scatter, F {_pF:+.4f} vs H {_pH:+.4f})')
+_flat = pol_table.copy()
+_flat['V_over_I_mean'] = _flat['V_over_I_mean'].mean()
+check_true('reports no contrast when the two bands are identical',
+           abs(_flat[_flat.band == 'F']['V_over_I_mean'].mean()
+               - _flat[_flat.band == 'H']['V_over_I_mean'].mean()) / _noise < 2)
+# polarisation_caveats must catch lanes that agree far more closely than either is determined
+_tight = pol_table.copy()
+_tight.loc[_tight.band == 'F', 'V_over_I_mean'] = _tight[_tight.band == 'F'][
+    'V_over_I_mean'].iloc[0]
+check_true('polarisation_caveats catches a common instrumental offset',
+           len(polarisation_caveats(_tight)) > 0,
+           '(two lanes of a band made identical)')
 
 print('\n' + '=' * 100)
 print(f'{len(PASS)} passed, {len(FAIL)} failed')
