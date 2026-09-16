@@ -27,9 +27,21 @@ def check_true(name, cond, detail=''):
 
 
 # ---------------------------------------------------------------- load the shipped code
-src = open('test_run.py').read()
-cut = src.index('print("\\n########## CELL 4')          # everything through A.4 is defined by then
-exec(compile(src[:cut], 'notebook', 'exec'), globals())
+import matplotlib
+matplotlib.use('Agg')
+import pandas as pd
+
+import make_fixture
+from typeii import *                      # noqa: F403 - the public analysis interface
+from typeii import pipeline as pl, tracing
+from typeii.config import *               # noqa: F403 - constants and tunables
+from typeii.physics import band_height, compare
+from typeii.session import Run
+
+# A synthetic event with known answers, carried through the analysis. Its results become module
+# globals so each assertion below can name them directly.
+RUN = make_fixture.build(quiet=True)
+globals().update({k: v for k, v in vars(RUN).items() if not k.startswith('__')})
 print('\n' + '=' * 100)
 print('VALIDATION OF THE NOTEBOOK FUNCTIONS AGAINST ANALYTIC GROUND TRUTH')
 print('=' * 100)
@@ -84,7 +96,7 @@ c2, c1, c0 = -2.0e-7, -5.0e-4, np.log10(70.0)
 ts = np.linspace(0, 400, 80)                                 # 5 s apart, so thinning must bite
 f_lane = 10 ** (c2 * ts ** 2 + c1 * ts + c0)
 lane = {'t': [t0 + pd.Timedelta(seconds=float(s)) for s in ts], 'f': list(f_lane)}
-fit = _lane_fit(lane)
+fit = lane_fit(RUN, lane)
 tq = np.array([50.0, 200.0, 350.0])
 f_got, df_got, rel_got = lane_deriv(fit, tq)
 f_exp = 10 ** (c2 * tq ** 2 + c1 * tq + c0)
@@ -96,13 +108,13 @@ for i, tt in enumerate(tq):
 check_true('thinning drops correlated samples',
            fit['n_fit'] < len(ts), f'({fit["n_fit"]} of {len(ts)} kept, FIT_MIN_DT_S={FIT_MIN_DT_S})')
 check_true('thinned points are at least FIT_MIN_DT_S apart',
-           np.all(np.diff(ts[_thin(ts)]) >= FIT_MIN_DT_S - 1e-9))
+           np.all(np.diff(ts[thin_samples(ts)]) >= FIT_MIN_DT_S - 1e-9))
 check_true('thinning does not bias the fit',
            abs(lane_deriv(fit, np.array([200.0]))[0][0]
                - 10 ** (c2 * 200 ** 2 + c1 * 200 + c0)) < 1e-6)
 check_true('_eval blanks outside the traced span',
-           np.isnan(_eval(fit, fit['p'], np.array([-50.0]))[0])
-           and np.isfinite(_eval(fit, fit['p'], np.array([200.0]))[0]))
+           np.isnan(eval_lane(fit, fit['p'], np.array([-50.0]))[0])
+           and np.isfinite(eval_lane(fit, fit['p'], np.array([200.0]))[0]))
 
 # ---------------------------------------------------------------- 6. kinematics and units
 print('\n6. kinematics: units and exactness (r = r0 + v t + a t^2 / 2)')
@@ -130,24 +142,23 @@ check_true('B scales linearly with v_A',
 
 # ---------------------------------------------------------------- 8. lane ordering
 print('\n8. lane ordering over the overlap (the bug that made B NaN)')
-_saved_traced, _saved_sigma = TRACED, LANE_SIGMA
+_saved_traced, _saved_sigma, _saved_passes = RUN.TRACED, RUN.LANE_SIGMA, RUN.passes
 tl = np.linspace(100, 800, 40)                               # long lane, high -> low
 ts_ = np.linspace(550, 800, 20)                              # short lane, sits ABOVE it
 long_lane = {'t': [t0 + pd.Timedelta(seconds=float(s)) for s in tl],
              'f': list(70 * (33 / 70) ** ((tl - 100) / 700))}
 short_lane = {'t': [t0 + pd.Timedelta(seconds=float(s)) for s in ts_],
               'f': list(1.15 * 70 * (33 / 70) ** ((ts_ - 100) / 700))}
-globals()['TRACED'] = ['F lane 1', 'F lane 2']
-globals()['LANE_SIGMA'] = {}
-globals()['passes'] = [{'F lane 1': long_lane, 'F lane 2': short_lane}]
-order, key, note = order_lanes(['F lane 1', 'F lane 2'])
+RUN.set(TRACED=['F lane 1', 'F lane 2'], LANE_SIGMA={},
+        passes=[{'F lane 1': long_lane, 'F lane 2': short_lane}])
+order, key, note = order_lanes(RUN, ['F lane 1', 'F lane 2'])
 check_true('long lane is the upstream branch', order[0] == 'F lane 1',
            f'order={order}, f={{{key["F lane 1"]:.1f}, {key["F lane 2"]:.1f}}} MHz, {note}')
 check('implied X = (f_U/f_L)^2', (key[order[1]] / key[order[0]]) ** 2, 1.15 ** 2, 2e-3, '', rel=True)
 check_true('own-span means would have inverted it',
            np.mean(long_lane['f']) > np.mean(short_lane['f']),
            f'(own-span means {np.mean(long_lane["f"]):.1f} vs {np.mean(short_lane["f"]):.1f} MHz)')
-globals()['TRACED'], globals()['LANE_SIGMA'] = _saved_traced, _saved_sigma
+RUN.set(TRACED=_saved_traced, LANE_SIGMA=_saved_sigma, passes=_saved_passes)
 
 # ---------------------------------------------------------------- 9. smoothing
 print('\n9. sg_smooth must not invent data outside the traced span')
@@ -173,8 +184,8 @@ check('first block centre time', (dec.index[0] - tt[0]).total_seconds(),
 
 # ---------------------------------------------------------------- 11. height-time fitters
 print('\n11. height-time fitters on exact constant-acceleration input')
-exec(compile(src[src.index("RS_KM = R_SUN_M / 1e3"):src.index("FIT_OUT = {}")], 'fits', 'exec'),
-     globals())
+from typeii.fitting import FIT_METHODS
+RS_KM = R_SUN_M / 1e3
 h0_km, v0_km, a0_ms2 = 1.6 * RS_KM, 550.0, -60.0
 tt_ = np.linspace(0, 1500, 50)
 h_ = h0_km + v0_km * tt_ + 0.5 * (a0_ms2 / 1e3) * tt_ ** 2
@@ -202,11 +213,9 @@ for nm, fn in FIT_METHODS.items():
 
 # ---------------------------------------------------------------- 12. polarisation sampling
 print('\n12. Stokes V/I sampling along a lane')
-exec(compile(src[src.index("POL_T = POL.index.to_numpy()"):src.index("pol_rows = []")],
-             'pol', 'exec'), globals())
 _pt = pd.date_range(LAYER_T[0], LAYER_T[-1], periods=200)
 _pf = np.interp(np.linspace(0, 1, 200), [0, 1], [60.0, 35.0])
-got_p = sample_polarisation(list(_pt), list(_pf))
+got_p = sample_polarisation(RUN, list(_pt), list(_pf))
 check_true('returns one value per traced point', len(got_p) == 200)
 check_true('values lie inside [-1, 1]', np.nanmax(np.abs(got_p)) <= 1.0)
 check_true('mean |x| of zero-mean noise returns ~0.8 sigma, not the mean',
@@ -215,19 +224,17 @@ check_true('mean |x| of zero-mean noise returns ~0.8 sigma, not the mean',
 
 # ---------------------------------------------------------------- 13. no-overlap ordering path
 print('\n13. order_lanes when the lanes never overlap')
-_st, _ss = TRACED, LANE_SIGMA
+_st, _ss, _sp = RUN.TRACED, RUN.LANE_SIGMA, RUN.passes
 ta_ = np.linspace(100, 400, 20)
 tb_ = np.linspace(600, 900, 20)
-globals()['TRACED'] = ['F lane 1', 'F lane 2']
-globals()['LANE_SIGMA'] = {}
-globals()['passes'] = [{
+RUN.set(TRACED=['F lane 1', 'F lane 2'], LANE_SIGMA={}, passes=[{
     'F lane 1': {'t': [t0 + pd.Timedelta(seconds=float(s)) for s in ta_],
                  'f': list(70 - 0.05 * (ta_ - 100))},
     'F lane 2': {'t': [t0 + pd.Timedelta(seconds=float(s)) for s in tb_],
-                 'f': list(40 - 0.02 * (tb_ - 600))}}]
-_o, _k, _n = order_lanes(['F lane 1', 'F lane 2'])
+                 'f': list(40 - 0.02 * (tb_ - 600))}}])
+_o, _k, _n = order_lanes(RUN, ['F lane 1', 'F lane 2'])
 check_true('non-overlapping lanes are flagged', 'WARNING' in _n, _n[:70] + '...')
-globals()['TRACED'], globals()['LANE_SIGMA'] = _st, _ss
+RUN.set(TRACED=_st, LANE_SIGMA=_ss, passes=_sp)
 
 # ---------------------------------------------------------------- 14. end-to-end closure
 print('\n14. end-to-end closure: inject a known split, recover X and M_A')
@@ -235,24 +242,26 @@ X_inj = 1.21                                                 # split factor 1.1 
 sp = np.sqrt(X_inj)
 tc = np.linspace(100, 1000, 60)
 f_lo = 65 * (30 / 65) ** ((tc - 100) / 900)
-globals()['TRACED'] = ['F lane 1', 'F lane 2']
-globals()['LANE_BAND'] = {'F lane 1': 'F', 'F lane 2': 'F'}
-globals()['BANDS_TRACED'] = ['F']
-globals()['LANE_SIGMA'] = {}
-globals()['passes'] = [{
-    'F lane 1': {'t': [t0 + pd.Timedelta(seconds=float(s)) for s in tc], 'f': list(f_lo)},
-    'F lane 2': {'t': [t0 + pd.Timedelta(seconds=float(s)) for s in tc], 'f': list(f_lo * sp)}}]
-_o, _k, _n = order_lanes(['F lane 1', 'F lane 2'])
-globals()['LANE_ORDER'] = {'F': _o}
-globals()['SPLIT_PAIR'] = {'F': (_o[0], _o[1])}
-sc = scalar_summary(passes)
+_sb, _sbt = RUN.LANE_BAND, RUN.BANDS_TRACED
+_slo, _ssp = RUN.LANE_ORDER, RUN.SPLIT_PAIR
+RUN.set(TRACED=['F lane 1', 'F lane 2'], LANE_SIGMA={}, BANDS_TRACED=['F'],
+        LANE_BAND={'F lane 1': 'F', 'F lane 2': 'F'}, passes=[{
+            'F lane 1': {'t': [t0 + pd.Timedelta(seconds=float(s)) for s in tc],
+                         'f': list(f_lo)},
+            'F lane 2': {'t': [t0 + pd.Timedelta(seconds=float(s)) for s in tc],
+                         'f': list(f_lo * sp)}}])
+_o, _k, _n = order_lanes(RUN, ['F lane 1', 'F lane 2'])
+RUN.set(LANE_ORDER={'F': _o}, SPLIT_PAIR={'F': (_o[0], _o[1])})
+sc = scalar_summary(RUN, RUN.passes)
 check('X recovered end to end', sc['F']['X'][0], X_inj, 1e-3, '', rel=True)
 check('M_A recovered end to end', sc['F']['M_A'][0],
       np.sqrt(X_inj * (X_inj + 5) / (2 * (4 - X_inj))), 1e-3, '', rel=True)
 check('relative bandwidth recovered', sc['F']['rel_bandwidth'][0], sp - 1, 1e-3, '', rel=True)
-globals()['TRACED'], globals()['LANE_SIGMA'] = _st, _ss
+RUN.set(TRACED=_st, LANE_SIGMA=_ss, passes=_sp, LANE_BAND=_sb, BANDS_TRACED=_sbt,
+        LANE_ORDER=_slo, SPLIT_PAIR=_ssp)
 
 # ---------------------------------------------------------------- 15. fit degree and significance
+_BASELINE_SCALE_S = 600      # a representative lane length, purely to size this test
 print('\n15. fit degree is set by point count, and significance decides what counts as measured')
 check_true('plenty of points keeps the quadratic', kin_degree(200) == KIN_DEG,
            f'(degree {kin_degree(200)})')
@@ -262,8 +271,8 @@ check_true('degree never goes below 1', kin_degree(2) == 1 and kin_degree(0) == 
 # The curvature of a SHORT lane must still be recovered: it is real, and refusing to fit it
 # because of the lane's duration is what a fixed baseline cut wrongly did.
 tg2 = np.linspace(0, 1500, 60)
-short = (tg2 >= 600) & (tg2 <= 600 + 0.5 * KIN_MIN_BASELINE_S)
-long_ = (tg2 >= 100) & (tg2 <= 100 + 2 * KIN_MIN_BASELINE_S)
+short = (tg2 >= 600) & (tg2 <= 600 + 0.5 * _BASELINE_SCALE_S)
+long_ = (tg2 >= 100) & (tg2 <= 100 + 2 * _BASELINE_SCALE_S)
 r_curved = 1.6 + (600e3 / R_SUN_M) * tg2 + 0.5 * (-500 / R_SUN_M) * tg2 ** 2
 _, a_short = kinematics(np.where(short, r_curved, np.nan), tg2, span=short)
 _, a_long = kinematics(np.where(long_, r_curved, np.nan), tg2, span=long_)
@@ -279,7 +288,7 @@ check_true('NaN a is never measured', not accel_is_measured(np.nan, 50)
            and not accel_is_measured(-500, np.nan) and not accel_is_measured(-500, 0))
 
 # fitting on the lane's own dense samples must not change an exactly-quadratic answer
-_td = np.linspace(600, 600 + 0.5 * KIN_MIN_BASELINE_S, KIN_N_DENSE)
+_td = np.linspace(600, 600 + 0.5 * _BASELINE_SCALE_S, KIN_N_DENSE)
 _rd = 1.6 + (600e3 / R_SUN_M) * _td + 0.5 * (-500 / R_SUN_M) * _td ** 2
 _, a_dense = kinematics(np.where(short, r_curved, np.nan), tg2, span=short,
                         t_fit=_td, r_fit=_rd)
@@ -294,7 +303,7 @@ check('dense per-lane fit gives the same a', np.nanmean(a_dense), -500, 1e-6, 'm
 # the wrong number.
 print('\n17. a constant-speed shock must return a = 0')
 _mdl = MODEL_GRID['Newkirk x2']
-_rr, _ne = _invert_grid(_mdl)
+_rr, _ne = invert_grid(_mdl)
 
 
 def _null_a(r0, T, s, deg):
@@ -302,9 +311,9 @@ def _null_a(r0, T, s, deg):
     tt = np.linspace(0, T, 300)
     r_true = r0 + (600 * 1e3 / R_SUN_M) * tt
     f_true = PLASMA_CONST * np.sqrt(_mdl(r_true)) * s / 1e6
-    fit = _lane_fit({'t': [t0 + pd.Timedelta(seconds=float(x)) for x in tt],
+    fit = lane_fit(RUN, {'t': [t0 + pd.Timedelta(seconds=float(x)) for x in tt],
                      'f': list(f_true)}, deg=deg, sigma_f=0.7)
-    to_r = lambda x: np.interp(freq_to_density(_eval(fit, fit['p'], x) * 1e6, harmonic=s),
+    to_r = lambda x: np.interp(freq_to_density(eval_lane(fit, fit['p'], x) * 1e6, harmonic=s),
                                _ne[::-1], _rr[::-1])
     td = np.linspace(fit['tmin'], fit['tmax'], KIN_N_DENSE)
     tgs = np.linspace(fit['tmin'], fit['tmax'], 60)
@@ -352,7 +361,7 @@ check('duplicate times are averaged, not first-wins', _o['f'][0],
 
 # (c) _thin must be correct on unsorted input, not just on the sorted input it happens to get
 _tu = np.array([0., 30., 5., 60., 12., 90.])
-_k = _thin(_tu)
+_k = thin_samples(_tu)
 check_true('_thin is safe on unsorted input',
            np.all(np.diff(np.sort(_tu[_k])) >= FIT_MIN_DT_S - 1e-9), f'(kept {list(_k)})')
 
@@ -379,8 +388,8 @@ _tt = np.linspace(0, 600, 40)
 _lo = {'t': [t0 + pd.Timedelta(seconds=float(x)) for x in _tt], 'f': list(50 - 0.02 * _tt)}
 _up = {'t': [t0 + pd.Timedelta(seconds=float(x)) for x in _tt], 'f': list(55 - 0.035 * _tt)}
 _g = np.linspace(0, 600, 20)
-_X = (lane_deriv(_lane_fit(_up, sigma_f=0.3), _g)[0]
-      / lane_deriv(_lane_fit(_lo, sigma_f=0.3), _g)[0]) ** 2
+_X = (lane_deriv(lane_fit(RUN, _up, sigma_f=0.3), _g)[0]
+      / lane_deriv(lane_fit(RUN, _lo, sigma_f=0.3), _g)[0]) ** 2
 _frac = float(np.mean(~((_X >= 1) & (_X < 4))))
 check_true('crossing branches are detectable as an X-validity fraction', _frac > 0.3,
            f'({100 * _frac:.0f}% of the overlap unusable, mean X = {np.nanmean(_X):.3f} '
@@ -392,14 +401,11 @@ check('B pipeline still matches the hand calculation',
 
 # ---------------------------------------------------------------- 16. LaTeX in f-strings
 print('\n16. no LaTeX macro can be eaten by a non-raw f-string')
-import json as _json, re as _re
-_nb = _json.load(open('plot_nenufar_new.ipynb'))
+import glob as _glob, re as _re
 _D = _re.compile(r'(?<!\\)\\[nrtvbfa](?=[a-zA-Z])')
 _bad = []
-for _c in _nb['cells']:
-    if _c['cell_type'] != 'code':
-        continue
-    for _ln in ''.join(_c['source']).splitlines():
+for _path in sorted(_glob.glob('typeii/*.py')):
+    for _ln in open(_path):
         for _m in _re.finditer(r"(?<![rR])\bf(['\"])(.*?)\1", _ln):
             for _seg in _re.findall(r'\$[^$]*\$', _m.group(2)):
                 if _D.search(_seg):
@@ -444,7 +450,7 @@ from scipy.optimize import brentq as _brentq
 _worst, _worst_at, _nchk = 0.0, '', 0
 _nonmono = []
 for _mname, _mdl in MODEL_GRID.items():
-    _rr_t, _ne_t = _invert_grid(_mdl)
+    _rr_t, _ne_t = invert_grid(_mdl)
     if not np.all(np.diff(_ne_t) < 0):
         _nonmono.append(_mname)
     for _s in (1, 2):
@@ -480,20 +486,37 @@ _errs = {}
 for _mult in (1, 2, 4):
     _saved = dict(LANE_SIGMA)
     LANE_SIGMA.update({k: v * _mult for k, v in _saved.items()})
-    _agg = aggregate_lanes(passes, tg, MODEL_GRID[REF_MODEL_NAME], n_mc=60, seed=1)
+    _agg = aggregate_lanes(RUN, passes, tg, MODEL_GRID[REF_MODEL_NAME], n_mc=60, seed=1)
     _errs[_mult] = grid_scalar(_agg[_lab0], 'r')[1]
     LANE_SIGMA.clear()
     LANE_SIGMA.update(_saved)
-check('error doubles when sigma_f doubles', _errs[2] / _errs[1], 2.0, 0.12, 'x', rel=False)
-check('error quadruples when sigma_f quadruples', _errs[4] / _errs[1], 4.0, 0.3, 'x')
+# The reported error is sqrt(fit^2 + spread^2). Only the fit term scales with sigma_f; the
+# pass-to-pass spread comes from the Bezier jitter and does not move. So the ratio rises with the
+# multiplier and approaches it from below without reaching it - asserting exact proportionality
+# would be asserting that the repeat term does not exist.
+for _m in (2, 4):
+    _ratio = _errs[_m] / _errs[1]
+    check_true(f'error rises with sigma_f x{_m}, approaching {_m} from below',
+               1.0 < _ratio < _m,
+               f'(ratio {_ratio:.2f}; the fixed repeat-spread term damps it below {_m})')
+# With total = sqrt((m f)^2 + s^2), the ratio as a fraction of m is sqrt(f^2 + s^2/m^2) /
+# sqrt(f^2 + s^2), which FALLS as m grows and the fixed term matters less in relative terms.
+check_true('the shortfall grows with the multiplier, as that form requires',
+           _errs[4] / _errs[1] / 4 < _errs[2] / _errs[1] / 2,
+           f'({_errs[2] / _errs[1] / 2:.3f} of x2, then {_errs[4] / _errs[1] / 4:.3f} of x4)')
+# Solve the two-component form for s/f from the x2 ratio and check it predicts the x4 ratio.
+_r2 = _errs[2] / _errs[1]
+_sf2 = (4 - _r2 ** 2) / (_r2 ** 2 - 1)                       # (s/f)^2
+check('x4 ratio predicted from the x2 ratio by sqrt(fit^2 + spread^2)',
+      _errs[4] / _errs[1], np.sqrt((16 + _sf2) / (1 + _sf2)), 0.05, 'x', rel=True)
 # The fixture carries a single pass, so build three jittered copies here - the same thing the
 # tracer's auto-repeat does - and check the aggregation does not treat them as independent.
 _rng0 = np.random.default_rng(7)
 _reps = [passes[0]] + [{k: {'t': list(v['t']),
                            'f': [float(x) + _rng0.normal(0, 0.05) for x in v['f']]}
                         for k, v in passes[0].items()} for _ in range(2)]
-_one = aggregate_lanes([passes[0]], tg, MODEL_GRID[REF_MODEL_NAME], n_mc=60, seed=1)
-_many = aggregate_lanes(_reps, tg, MODEL_GRID[REF_MODEL_NAME], n_mc=60, seed=1)
+_one = aggregate_lanes(RUN, [passes[0]], tg, MODEL_GRID[REF_MODEL_NAME], n_mc=60, seed=1)
+_many = aggregate_lanes(RUN, _reps, tg, MODEL_GRID[REF_MODEL_NAME], n_mc=60, seed=1)
 _r1, _rN = grid_scalar(_one[_lab0], 'r')[1], grid_scalar(_many[_lab0], 'r')[1]
 check_true('jittered repeats do NOT divide the error by sqrt(N)',
            _rN > _r1 / np.sqrt(len(_reps)) * 1.3,
@@ -526,7 +549,7 @@ try:
     SPLIT_PAIR.clear(); SPLIT_PAIR.update({'F': ('F lane 1', 'F lane 2')})
     BANDS_TRACED[:] = ['F']
     _tg2 = np.linspace(_tt.min(), _tt.max(), N_GRID)
-    _ag = aggregate_lanes([{'F lane 1': _mk(_f_lo), 'F lane 2': _mk(_f_hi)}], _tg2, _MDL, n_mc=1)
+    _ag = aggregate_lanes(RUN, [{'F lane 1': _mk(_f_lo), 'F lane 2': _mk(_f_hi)}], _tg2, _MDL, n_mc=1)
     _d = _ag['F lane 1']
     _cm = common_mask(_d)
     # Compare against the truth evaluated on THE SAME grid points the pipeline averaged over.
