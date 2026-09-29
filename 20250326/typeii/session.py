@@ -48,9 +48,11 @@ class Run:
     def __getattr__(self, name):
         raise AttributeError(
             f'{name!r} has not been produced yet. The steps are ordered: build_layer, '
-            f'build_model_grid, collect_traces, analyse_lanes, polarisation, fh_tests, '
-            f'audit_consistency, height_time_fits, model_sweep, characteristics_table, '
-            f'results_text, export_tracks.')
+            f'build_model_grid, load_controls (or the LaneTracer widget), collect_traces, '
+            f'plot_traced_lanes, analyse_lanes, polarisation, fh_tests, audit_consistency, '
+            f'height_time_fits, model_sweep, characteristics_table, results_text, export_tracks.'
+            f'\nplot_traced_lanes is not optional despite the name: it measures the per-lane '
+            f'frequency uncertainty (LANE_SIGMA) that every fit downstream is weighted by.')
 
     def __repr__(self):
         have = [k for k in vars(self) if not k.startswith('_')]

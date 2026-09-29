@@ -38,7 +38,7 @@ TYPEII_FLIM   = [25, 85]         # MHz, the part of the band the burst occupies
 # --- tracing ---------------------------------------------------------------------------------
 N_REPS            = 3            # repeats recorded per lane
 TRACE_METHOD      = 'click'      # method the tracer opens with; switchable live
-BEZIER_ANCHORS    = 2            # 1 -> quadratic, 2 -> cubic
+BEZIER_ANCHORS    = 1            # 1 -> quadratic, 2 -> cubic; the 26 Mar 2025 lanes are quadratic
 BEZIER_NUM_POINTS = 80           # samples taken along the curve when it is recorded
 BEZIER_JITTER_MHZ = 0.4          # target 1-sigma frequency displacement of the auto-repeats
 BEZIER_SEED       = 0
@@ -107,6 +107,15 @@ CONSIST_SIGMA    = 3             # flag a disagreement beyond this many combined
 
 # --- export ------------------------------------------------------------------------------------
 EXPORT_DT_S  = 10                # cadence of the exported height-time tracks [s]
+# Which published B(r) laws to draw on the A.9 comparison. Only laws calibrated over a range that
+# overlaps this burst (about 1.3-4 Rsun) are on by default. Gopalswamy & Yashiro (2011) is
+# available but off: it was calibrated on CME-shock standoff distances over 6-23 Rsun, so drawing
+# it here extrapolates it 1.5 to 4.7 times below its lower bound and it constrains nothing.
+# Override per call: pl.plot_bfield(run, refs=('dulk_mclean', 'mann2023', 'gopalswamy_yashiro')).
+B_REF_CURVES = ('dulk_mclean', 'mann2023')
+
+CONTROLS_FILE = 'typeii_bezier_controls.csv'   # the Bezier control points a run was traced
+                                               # from; load_controls replays them
 EXPORT_N_MC  = 40                # MC draws per pass for the exported error column
 R_LIMB_RSUN  = 1                 # heliocentric radius of the limb, for the above-limb convention
 REPORT_EXCITER_ENERGY = False    # (gamma-1) m_e c^2 at the shock speed is ~1 eV and misleads

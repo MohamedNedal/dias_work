@@ -47,23 +47,25 @@ print('non-finite in Stokes I:', int(np.sum(~np.isfinite(df_int.to_numpy()))))
 
 # the real recorded traces, in place of anything the widget would have produced
 INJECT = f'''
+from typeii import tracing as _tr
+from typeii.config import BANDS as _BANDS, N_REPS as _N_REPS
 _pk = pickle.load(open('{D}/type2_nanufar_20250326/typeii_picks.pkl', 'rb'))
-TRACE_STORE.clear()
-TRACE_STORE.update(_pk['traces'])
-TRACE_HISTORY.clear()
+_tr.TRACE_STORE.clear()
+_tr.TRACE_STORE.update(_pk['traces'])
+_tr.TRACE_HISTORY.clear()
 for _l, _v in _pk['traces'].items():
-    TRACE_HISTORY.extend([_l] * len(_v))
-TRACE_KIND.clear()
+    _tr.TRACE_HISTORY.extend([_l] * len(_v))
+_tr.TRACE_KIND.clear()
 for _l in _pk['traces']:
-    TRACE_KIND[_l] = 'bezier auto-repeats'
-tracer = object.__new__(LaneTracer)
-tracer.n_reps = N_REPS
-tracer.bands = list(BANDS)
-tracer.traces = TRACE_STORE
-tracer.history = TRACE_HISTORY
-tracer.lane_no = {{b: 1 for b in BANDS}}
-print('=== REAL PICKS:', len(TRACE_STORE), 'lanes x',
-      [len(v) for v in TRACE_STORE.values()], 'repeats ===')
+    _tr.TRACE_KIND[_l] = 'bezier auto-repeats'
+tracer = object.__new__(_tr.LaneTracer)
+tracer.n_reps = _N_REPS
+tracer.bands = list(_BANDS)
+tracer.traces = _tr.TRACE_STORE
+tracer.history = _tr.TRACE_HISTORY
+tracer.lane_no = {{_b: 1 for _b in _BANDS}}
+print('=== REAL PICKS:', len(_tr.TRACE_STORE), 'lanes x',
+      [len(_v) for _v in _tr.TRACE_STORE.values()], 'repeats ===')
 '''
 
 nb = json.load(open(SRC))

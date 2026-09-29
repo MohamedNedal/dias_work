@@ -423,6 +423,17 @@ class LaneTracer:
                             for k in range(self.n_reps - done)]
             else:
                 new_reps = [self._bezier_rep(0)]
+            # keep the numbers the curve was placed with, so the lane can be rebuilt without the
+            # widget and without the sampled trace
+            _v = {k: s.value for k, s in self._sliders.items()}
+            TRACE_CONTROLS[lab] = {'x_start': _v['x_start'], 'y_start': _v['y_start'],
+                                   'x_end': _v['x_end'], 'y_end': _v['y_end'],
+                                   'cx1': _v['cx1'], 'cy1': _v['cy1'],
+                                   **({'cx2': _v['cx2'], 'cy2': _v['cy2']}
+                                      if self.n_anchors == 2 else {}),
+                                   'n_anchors': self.n_anchors,
+                                   'num_points': BEZIER_NUM_POINTS, 'n_reps': self.n_reps,
+                                   'jitter_seed': BEZIER_SEED}
         self.traces.setdefault(lab, []).extend(new_reps)
         self.history.extend([lab] * len(new_reps))
         # Any jittered repeat makes the lane's spread a jitter measurement, however many were
@@ -530,6 +541,9 @@ TRACE_STORE = {}     # label -> list of repeats, each {'t': [...], 'f': [...]}
 TRACE_HISTORY = []   # labels in the order they were recorded, for Delete last
 TRACE_KIND = {}      # label -> how the repeats were produced. Jittered copies of one Bezier are
                      # not independent re-tracings and their spread is not a reproducibility error
+TRACE_CONTROLS = {}  # label -> the Bezier control points it was placed with, in layer index units.
+                     # A trace is 80 sampled frequencies; these six or eight numbers are what the
+                     # person actually chose, and they are what makes the lane reproducible.
 
 # The tracer is a widget bound to one displayed layer, so the layer it draws on is held here and
 # set by bind_layer once the layer exists. Everything else in the package takes its state as an
@@ -547,4 +561,74 @@ def bind_layer(run):
     CBAR_LABEL = run.CBAR_LABEL
     BEZIER_JITTER = run.BEZIER_JITTER
     RUN = run
-    
+
+
+class ReplayTracer:
+    """A tracer that replays recorded control points instead of opening a widget.
+
+    Presents the same surface pipeline.collect_traces uses - traces, passes, labels, colour,
+    n_reps - so the rest of the analysis cannot tell the difference between a lane placed by
+    hand and one rebuilt from its six numbers.
+    """
+    labels = LaneTracer.labels
+    order = LaneTracer.order
+    colour = LaneTracer.colour
+    passes = LaneTracer.passes
+    summary = LaneTracer.summary
+
+    def __init__(self, controls, bands=None, jitter=None):
+        self.n_anchors = int(controls[next(iter(controls))]['n_anchors'])
+        self.n_reps = int(controls[next(iter(controls))]['n_reps'])
+        self.bands = list(bands) if bands else list(BANDS)
+        self.traces = TRACE_STORE
+        self.history = TRACE_HISTORY
+        self.lane_no = {b: 1 for b in self.bands}
+        self.method = 'bezier'
+        self.controls = controls
+        self._replay(BEZIER_JITTER if jitter is None else jitter)
+
+    def _replay(self, jitter):
+        """Rebuild every lane, in the recorded order, off one seeded stream.
+
+        The rng is shared across lanes exactly as it is in a live session, so the draws a lane
+        receives depend on how many lanes preceded it. Replaying them in a different order
+        returns different repeats - the same curve, a different jitter realisation.
+        """
+        TRACE_STORE.clear(); TRACE_HISTORY.clear(); TRACE_KIND.clear()
+        TRACE_CONTROLS.clear(); TRACE_CONTROLS.update(self.controls)
+        rng = np.random.default_rng(int(list(self.controls.values())[0]['jitter_seed']))
+        for lab, c in self.controls.items():
+            pts = [[c['x_start'], c['y_start']], [c['x_end'], c['y_end']], [c['cx1'], c['cy1']]]
+            if int(c['n_anchors']) == 2:
+                pts.append([c['cx2'], c['cy2']])
+            base0 = np.array(pts, float)
+            reps = []
+            for k in range(int(c['n_reps'])):
+                base = base0 if k == 0 else base0 + rng.normal(0, jitter, base0.shape)
+                (sx, sy), (ex, ey) = base[0], base[1]
+                xi, yi = bezier_indices(sx, sy, ex, ey, [list(p) for p in base[2:]],
+                                        int(c['n_anchors']) + 1, int(c['num_points']))
+                reps.append(bezier_freq_lane(xi, yi))
+            TRACE_STORE[lab] = reps
+            TRACE_HISTORY.extend([lab] * len(reps))
+            TRACE_KIND[lab] = ('bezier auto-repeats' if int(c['n_reps']) > 1
+                               else 'independent traces')
+        for b in self.bands:
+            used = [int(l.split()[-1]) for l in TRACE_STORE if l.startswith(b + ' lane ')]
+            self.lane_no[b] = (max(used) + 1) if used else 1
+
+
+def read_controls(path):
+    """Read a Bezier control-point table written by pipeline.export_controls.
+
+    Row order is significant: it is the order the lanes were traced in, which is the order the
+    shared jitter stream is consumed in.
+    """
+    df = pd.read_csv(path)
+    need = {'lane', 'x_start', 'y_start', 'x_end', 'y_end', 'cx1', 'cy1', 'n_anchors',
+            'num_points', 'n_reps', 'jitter_seed'}
+    missing = need - set(df.columns)
+    if missing:
+        raise ValueError(f'{path} is missing column(s): {sorted(missing)}')
+    return {r['lane']: {k: v for k, v in r.items() if k != 'lane'}
+            for _, r in df.iterrows()}

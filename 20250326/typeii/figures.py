@@ -4,32 +4,35 @@ import os
 
 import numpy as np
 
-from . import config as cfg
 from .config import JOINT
 from .fitting import accel_is_measured, sg_smooth
 
 
-def save_fig(fig, name, dpi=300):
-    """Save a figure to the run output directory at 300 dpi."""
-    path = os.path.join(cfg.OUTDIR, f'{name}.png')
+def save_fig(run, fig, name, dpi=300):
+    """Save a figure into this run's output directory at 300 dpi.
+
+    Takes the run so the destination travels with the analysis. Reading it from a module global
+    means a reload of the config wipes it, and every plot then fails on a None path.
+    """
+    path = os.path.join(run.OUTDIR, f'{name}.png')
     fig.savefig(path, dpi=dpi, bbox_inches='tight')
     print('saved', path)
 
-def has_track(run, key, k):
+def has_track(run, key, k, al=None):
     """Does this track carry enough finite samples of k to be worth plotting?"""
     # state this step works on
-    ALref = run.ALref
+    ALref = run.ALref if al is None else al
 
     return key in ALref and np.isfinite(ALref[key][k + '_mean']).sum() > 2
 
-def track_panel(run, ax, key_list, k, ylabel, unit, fmt='{:.3g}'):
+def track_panel(run, ax, key_list, k, ylabel, unit, fmt='{:.3g}', al=None):
     """Plot one derived quantity against time for the given tracks, with error bars."""
     # state this step works on
-    ALref, A_BIAS = run.ALref, run.A_BIAS
+    ALref, A_BIAS = (run.ALref if al is None else al), run.A_BIAS
     LANE_COL, t0, tg = run.LANE_COL, run.t0, run.tg
 
     for key in key_list:
-        if not has_track(run, key, k):
+        if not has_track(run, key, k, al=ALref):
             continue
         c = LANE_COL[key]
         m, err = ALref[key][k + '_mean'], ALref[key][k + '_se']

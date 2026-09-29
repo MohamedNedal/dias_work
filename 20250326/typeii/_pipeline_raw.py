@@ -1,47 +1,3 @@
-# -*- coding: utf-8 -*-
-"""The analysis, one function per step, in the order the notebook runs them.
-
-Each step takes a Run, reads the results earlier steps put there, and writes its own back. The
-science lives in the sibling modules; this file is the order things happen in and the printed
-commentary that goes with them. METHODS.md describes what each step is for.
-"""
-import os
-import pickle
-import textwrap
-
-import matplotlib.dates as mdates
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-from tqdm.auto import tqdm
-
-from .config import (A_PLAUSIBLE_MS2, BAND_NAME, BANDS, B_REF_CURVES, BEZIER_ANCHORS,
-                     BEZIER_JITTER_MHZ,
-                     CONSIST_SIGMA, CONTROLS_FILE,
-                     EXPORT_DT_S, EXPORT_N_MC, FIT_IN_LOGF, FOLDS, HARM, INFLATE_BY_CHI2,
-                     INVERT_FREQ, JOINT, KIN_A_SIGMA, KIN_N_DENSE, LANE_DEG, LANE_FIT_MAX_RESID,
-                     LANE_SIGMA_FLOOR, LANE_SIGMA_MHZ, LAYER_MODE, MAKE_JOINT, N_BOOT, N_REPS,
-                     PLASMA_CONST, POLY_DEG, PREVIEW_MAX_TCOLS, QC_CONTROL_SHIFT, QC_MIN_SNR_DB,
-                     KIN_DEG, REF_LANE, REF_MODEL_NAME, REPORT_EXCITER_ENERGY, R_LIMB_RSUN,
-                     R_SUN_M,
-                     TYPEII_FLIM)
-from .export import df_to_latex, field_context, fmt_sci, fmt_tex, fmt_value
-from .figures import has_track, save_fig, track_panel
-from .fitting import (FIT_COLOR, FIT_METHODS, accel_bias_floor, accel_is_measured,
-                      build_grid, fit_byrne, fit_gallagher,
-                      fit_polynomial, hva, kin_degree, lane_deriv, lane_fit, lane_fit_quality,
-                      pass_fits, sg_smooth)
-from .models import (B_dulk_mclean, B_gopalswamy_yashiro, B_mann2023, baumbach_allen,
-                     electron_energy_from_speed, invert_grid, leblanc, mann2023, newkirk, saito)
-from .physics import (aggregate_lanes, band_height, common_mask, compare, grid_scalar,
-                      lane_windows,
-                      order_lanes, polarisation_caveats, rel_drift_on_points, sample_polarisation,
-                      scalar_summary)
-from .spectra import LAST_STRETCH, decimate, draw_layer, window
-from . import tracing
-from .tracing import TRACE_HISTORY, TRACE_KIND, TRACE_STORE, ridge_rms
-
-
 def build_layer(run):
     """Build the tracing layer: window, decimate, and record the channel width."""
     # from the run
@@ -75,32 +31,20 @@ def build_layer(run):
           f'(decimated {kt_P}x in time, {kf_P}x in frequency)')
 
     # --- convert the target Bezier jitter from MHz into channels of this layer -------------------
-    # Jittering every control point independently by sigma does NOT move the curve by sigma: the
-    # curve is a weighted average of them, so the displacement is attenuated by the rms of the
-    # Bernstein basis over the curve. The attenuation depends on the DEGREE, so it is keyed to
-    # BEZIER_ANCHORS rather than assumed cubic:
-    #   quadratic  sqrt(int[(1-t)^4 + 4(1-t)^2 t^2 + t^4] dt)            = sqrt(8/15)  = 0.730
-    #   cubic      sqrt(int[(1-t)^6 + 9(1-t)^4 t^2 + 9(1-t)^2 t^4 + t^6] dt) = sqrt(16/35) = 0.676
-    # Using the cubic figure for a quadratic trace overshoots the target jitter by 8%.
+    # Jittering all four control points of a cubic independently by sigma does NOT move the curve by
+    # sigma: the curve is a weighted average of them, so the displacement is attenuated. For a cubic
+    # the rms attenuation over the curve is sqrt(int[(1-t)^6 + 9(1-t)^4 t^2 + 9(1-t)^2 t^4 + t^6] dt)
+    # = sqrt(0.4571) = 0.676. Divide it out so the achieved spread lands on the target.
     CHAN_MHZ = float(np.nanmedian(np.diff(LAYER_F)))
     run.set(CHAN_MHZ=CHAN_MHZ)
-    _kind = {1: ('quadratic', np.sqrt(8 / 15)), 2: ('cubic', np.sqrt(16 / 35))}
-    _name, BEZIER_CURVE_ATTEN = _kind[BEZIER_ANCHORS]
+    BEZIER_CURVE_ATTEN = 0.676
     if BEZIER_JITTER is None:
         BEZIER_JITTER = round(BEZIER_JITTER_MHZ / (CHAN_MHZ * BEZIER_CURVE_ATTEN), 1)
         print(f'\nBEZIER_JITTER = {BEZIER_JITTER:.1f} channels, derived from '
               f'BEZIER_JITTER_MHZ = {BEZIER_JITTER_MHZ} MHz')
-        print(f'  ({CHAN_MHZ * 1e3:.0f} kHz per channel, divided by the '
-              f'{BEZIER_CURVE_ATTEN:.3f} {_name} attenuation). '
-              'The traced-lanes figure reports the spread actually achieved.')
+        print(f'  ({CHAN_MHZ * 1e3:.0f} kHz per channel, divided by the {BEZIER_CURVE_ATTEN} cubic '
+              'attenuation). The traced-lanes figure reports the spread actually achieved.')
     run.set(BEZIER_JITTER=BEZIER_JITTER)
-
-    run.set(CBAR_LABEL='dB above background' if LAYER_MODE == 'db_sub'
-            else 'ratio to background')
-
-    # The tracer is a widget drawn on one layer, so it holds a reference to this one rather than
-    # taking it as an argument on every interaction.
-    tracing.bind_layer(run)
 
 
 def plot_stretch_comparison(run):
@@ -128,7 +72,7 @@ def plot_stretch_comparison(run):
             ax.set_xlabel('')
     fig.suptitle('Choosing the display stretch', y=1.005, fontsize=13)
     fig.tight_layout()
-    save_fig(run, fig, 'display_stretch_comparison')
+    save_fig(fig, 'display_stretch_comparison')
     plt.show()
 
 
@@ -144,7 +88,7 @@ def plot_window(run):
     ax.set_title(f'NenuFAR type II tracing layer  (plo={LAST_STRETCH["plo"]}, '
                  f'phi={LAST_STRETCH["phi"]}, gamma={LAST_STRETCH["gamma"]})')
     fig.tight_layout()
-    save_fig(run, fig, 'nenufar_typeii_window')
+    save_fig(fig, 'nenufar_typeii_window')
     plt.show()
 
 
@@ -194,59 +138,8 @@ def plot_density_models(run):
     ax.grid(alpha=0.3, which='both')
 
     fig.tight_layout()
-    save_fig(run, fig, 'density_models')
+    save_fig(fig, 'density_models')
     plt.show()
-
-
-def load_controls(run, path=None):
-    """Rebuild the lanes from a saved Bezier control-point table, with no widget.
-
-    This is the reproduction path: the six numbers per lane in the CSV, plus the seed, are the
-    whole of the human input to this analysis. Anyone with the dynamic spectra and that file
-    gets the published tracks back. Pass a path, or leave it None to use the controls file in
-    OUTDIR.
-    """
-    path = path or os.path.join(run.OUTDIR, CONTROLS_FILE)
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f'no control-point table at {path}. Either trace the lanes with t2.LaneTracer(), '
-            f'which writes one, or point load_controls at the {CONTROLS_FILE} shipped with the '
-            'analysis.')
-    controls = tracing.read_controls(path)
-    run.tracer = tracing.ReplayTracer(controls)
-    print(f'replayed {len(controls)} lane(s) from {os.path.basename(path)}: '
-          + ', '.join(controls))
-    _c = next(iter(controls.values()))
-    _deg = {1: 'quadratic', 2: 'cubic'}[int(_c['n_anchors'])]
-    print(f'  {_deg} Bezier, {int(_c["num_points"])} samples, {int(_c["n_reps"])} repeats, '
-          f'jitter {run.BEZIER_JITTER} channels from seed {int(_c["jitter_seed"])}')
-    print('  row order in that file is the order the lanes were traced in, which is the order the '
-          'shared\n  jitter stream is consumed in - reordering it returns a different realisation '
-          'of the repeats')
-    return run.tracer
-
-
-def export_controls(run):
-    """Write the control points this run's lanes were placed with, into OUTDIR.
-
-    Every run ships the input that produced it, whether the lanes came from the widget or from
-    a previous run's table. Without this the traces are only recoverable from a pickle.
-    """
-    if not tracing.TRACE_CONTROLS:
-        print(f'  no Bezier control points recorded, so no {CONTROLS_FILE} written. Lanes placed '
-              'by clicking\n  have no control points; they are recoverable only from '
-              'typeii_picks.pkl.')
-        return None
-    cols = ['lane', 'x_start', 'y_start', 'x_end', 'y_end', 'cx1', 'cy1', 'cx2', 'cy2',
-            'n_anchors', 'num_points', 'n_reps', 'jitter_seed']
-    rows = [{'lane': lab, **c} for lab, c in tracing.TRACE_CONTROLS.items()]
-    df = pd.DataFrame(rows)[[c for c in cols if c in set().union(*(r.keys() for r in rows))]]
-    out = os.path.join(run.OUTDIR, CONTROLS_FILE)
-    df.to_csv(out, index=False)
-    run.set(controls_table=df)
-    print(f'  {CONTROLS_FILE}: the {len(df)} curves this run was traced from. '
-          f'pl.load_controls(run) replays them.')
-    return df
 
 
 def collect_traces(run):
@@ -324,9 +217,7 @@ def collect_traces(run):
         print('        Because of this the aggregation in A.4 will NOT divide the spread by '
               'sqrt(N_pass).')
 
-    # ship the input with the output: whatever the lanes came from, write the curves back out
-    export_controls(run)
-    return tracer.summary()
+    tracer.summary()
 
 
 def plot_traced_lanes(run):
@@ -410,7 +301,7 @@ def plot_traced_lanes(run):
     if not _spread:
         ax.text(0.5, 0.03, 'one repeat per lane - no spread to show',
                 transform=ax.transAxes, ha='center', fontsize=9, color='0.3')
-    save_fig(run, fig, 'traced_lanes_preview')
+    save_fig(fig, 'traced_lanes_preview')
     plt.show()
 
     # --- tracing quality: how far is each traced point from the local intensity ridge? ---
@@ -915,8 +806,7 @@ def fh_tests(run):
                  np.nan, 'the ratio ramps rather than scattering; start and end bracket it'),
             # Measured on the traced samples inside the overlap, not on the two cubics. Comparing the
             # cubics puts the fundamental's last 32% against the harmonic's first 13%, where a cubic's
-            # derivative is at its least constrained; taken from the fits the two bands differ by
-        # 15%, against 3% measured on the points.
+            # derivative is at its least constrained, and that alone produced a 15% gap at 5.6 sigma.
             # The error is now a real one from the fits to those points, in place of a nominal 2%.
             _row('consistency test', 'relative drift, H minus F [1/s]', rdH - rdF,
                  float(np.hypot(rdF_e, rdH_e)), 0,
@@ -1008,8 +898,8 @@ def audit_consistency(run):
         _check('density jump X: F vs H', *scalars['F']['X'], *scalars['H']['X'],
                'X is model-independent and both bands measure the same shock')
     if OVERLAP is not None:
-        # rdF and rdH are measured on the traced points inside the overlap and carry real errors,
-        # so the comparison uses those rather than a nominal fraction of the value.
+        # rdF and rdH are now measured on the traced points inside the overlap and carry real errors,
+        # so the nominal 2% that used to stand in for an uncertainty here is gone.
         _check('relative drift over the overlap: F vs H', rdF, rdF_e, rdH, rdH_e,
                'f^-1 df/dt is a property of the shock, free of the harmonic number')
 
@@ -1194,19 +1084,12 @@ def plot_fh_checks(run):
     ax.grid(alpha=0.3)
 
     fig.tight_layout()
-    save_fig(run, fig, 'fundamental_harmonic_checks')
+    save_fig(fig, 'fundamental_harmonic_checks')
     plt.show()
 
 
-def plot_kinematics(run, model=None, method=None):
-    """Height, speed, acceleration and magnetic field per lane.
-
-    model  a key of run.MODEL_GRID, e.g. 'Saito x3'. None uses REF_MODEL_NAME.
-    method a key of FIT_METHODS, e.g. 'Byrne (2013)'. None fits a polynomial of degree KIN_DEG.
-
-    Either one recomputes the whole chain for that choice. run.ALref, and every number the tables
-    and the results text quote, are left untouched.
-    """
+def plot_kinematics(run):
+    """Height, speed, acceleration and magnetic field per lane."""
     # from the run
     TRACKS = run.TRACKS
     BANDS_TRACED = run.BANDS_TRACED
@@ -1217,24 +1100,18 @@ def plot_kinematics(run, model=None, method=None):
     TRACED = run.TRACED
     LANE_SIGMA = run.LANE_SIGMA
 
-    mdl_name = REF_MODEL_NAME if model is None else model
-    meth_name = 'Polynomial (degree %d)' % KIN_DEG if method is None else method
-    AL = (run.ALref if (model is None and method is None) else
-          aggregate_lanes(run, run.passes, run.tg, run.MODEL_GRID[mdl_name],
-                          kin_method=method))
-
     fig = plt.figure(figsize=[14, 9])
 
     ax = fig.add_subplot(221)
-    track_panel(run, ax, TRACKS, 'r', r'$r\,/\,R_\odot$', r'$R_\odot$', '{:.3f}', al=AL)
-    ax.set_title(f'(a) Height-time  ({mdl_name})')
+    track_panel(run, ax, TRACKS, 'r', r'$r\,/\,R_\odot$', r'$R_\odot$', '{:.3f}')
+    ax.set_title(f'(a) Height-time  ({REF_MODEL_NAME})')
 
     ax = fig.add_subplot(222)
-    track_panel(run, ax, TRACKS, 'v', r'$v_{\rm sh}$ [km s$^{-1}$]', 'km/s', '{:.0f}', al=AL)
-    ax.set_title(f'(b) Shock speed  ({meth_name})')
+    track_panel(run, ax, TRACKS, 'v', r'$v_{\rm sh}$ [km s$^{-1}$]', 'km/s', '{:.0f}')
+    ax.set_title('(b) Shock speed')
 
     ax = fig.add_subplot(223)
-    track_panel(run, ax, TRACKS, 'a', r'$a$ [m s$^{-2}$]', r'm s$^{-2}$', '{:.1f}', al=AL)
+    track_panel(run, ax, TRACKS, 'a', r'$a$ [m s$^{-2}$]', r'm s$^{-2}$', '{:.1f}')
     ax.axhline(0, color='0.6', lw=0.8)
     ax.set_title('(c) Acceleration')
 
@@ -1244,9 +1121,9 @@ def plot_kinematics(run, model=None, method=None):
     # nor the downstream one. Plotting all four lanes here invited exactly the branch-to-branch
     # comparison that is not meaningful.
     _B_TRACKS = [k for k in TRACKS if LANE_ROLE.get(k, '').startswith('upstream') or k == JOINT]
-    track_panel(run, ax, _B_TRACKS, 'B', r'$B$ [G]', 'G', '{:.3f}', al=AL)
+    track_panel(run, ax, _B_TRACKS, 'B', r'$B$ [G]', 'G', '{:.3f}')
     ax.set_title('(d) Coronal magnetic field  (upstream branches only)')
-    if not any(has_track(run, k, 'B', al=AL) for k in TRACKS):
+    if not any(has_track(run, k, 'B') for k in TRACKS):
         # B needs M_A, which needs 1 <= X < 4. Say so in the panel instead of leaving it blank.
         bad = [f'{BAND_NAME[b]}: X = {scalars[b]["X"][0]:.3f}' for b in BANDS_TRACED
                if not np.isfinite(scalars[b]['M_A'][0])]
@@ -1265,18 +1142,12 @@ def plot_kinematics(run, model=None, method=None):
     fig.suptitle(f'Type II kinematics and coronal magnetic field, NenuFAR {EVENT_DATE}\n' + _errsrc,
                  y=1.03, fontsize=11)
     fig.tight_layout()
-    save_fig(run, fig, 'typeii_kinematics_Bfield')
+    save_fig(fig, 'typeii_kinematics_Bfield')
     plt.show()
 
 
-def height_time_fits(run, model=None, lane=None):
-    """Fit a track with each height-time method.
-
-    model a key of run.MODEL_GRID. None uses REF_MODEL_NAME.
-    lane  a traced lane name. None picks the reference track as before.
-
-    Passing either recomputes the chain for that choice; the default run is unchanged.
-    """
+def height_time_fits(run):
+    """Fit the reference track with each height-time method."""
     # from the run
     (ALref, tg, TRACED, BANDS_TRACED, SPLIT_PAIR) = (
         run.ALref, run.tg, run.TRACED, run.BANDS_TRACED, run.SPLIT_PAIR
@@ -1285,15 +1156,8 @@ def height_time_fits(run, model=None, lane=None):
     RS_KM = R_SUN_M / 1e3
     run.set(RS_KM=RS_KM)
 
-    mdl_name = REF_MODEL_NAME if model is None else model
-    if model is not None:
-        ALref = aggregate_lanes(run, run.passes, tg, run.MODEL_GRID[mdl_name])
-    run.set(FIT_MODEL_NAME=mdl_name)
-
     # which track the height-time fits and the model sweep use
-    if lane is not None:
-        REF_TRACK = lane
-    elif REF_LANE is not None:
+    if REF_LANE is not None:
         REF_TRACK = REF_LANE
     elif MAKE_JOINT and JOINT in ALref and np.isfinite(ALref[JOINT]['r_mean']).sum() > 3:
         REF_TRACK = JOINT
@@ -1303,8 +1167,8 @@ def height_time_fits(run, model=None, lane=None):
                           if k in ALref and np.isfinite(ALref[k]['r_mean']).sum() > 3), None)
     run.set(REF_TRACK=REF_TRACK)
     if REF_TRACK is None:
-        raise RuntimeError('no usable height-time track on ' + mdl_name)
-    print(f'height-time fits and the model sweep use: {REF_TRACK}  ({mdl_name})')
+        raise RuntimeError('no usable height-time track on ' + REF_MODEL_NAME)
+    print(f'height-time fits and the model sweep use: {REF_TRACK}  ({REF_MODEL_NAME})')
 
 
     # Each fitter returns h, v and a as callables with ANALYTIC derivatives. Nothing is finite
@@ -1320,6 +1184,11 @@ def height_time_fits(run, model=None, lane=None):
 
 
 
+    FIT_METHODS = {'Polynomial': fit_polynomial, 'Gallagher (2003)': fit_gallagher,
+                   'Byrne (2013)': fit_byrne}
+    run.set(FIT_METHODS=FIT_METHODS)
+    FIT_COLOR = {'Polynomial': 'tab:blue', 'Gallagher (2003)': 'tab:green', 'Byrne (2013)': 'tab:red'}
+    run.set(FIT_COLOR=FIT_COLOR)
 
     _d = ALref[REF_TRACK]
     _good = np.isfinite(_d['r_mean'])
@@ -1401,9 +1270,9 @@ def height_time_fits(run, model=None, lane=None):
     print('  either. A.6 fits the lane over KIN_N_DENSE samples of its OWN traced span and averages')
     print('  the result over the Monte-Carlo draws; this section fits the shared-grid points that')
     print('  fall inside the lane and bootstraps them. r(t) is not exactly a quadratic, so a fitted')
-    print('  curvature depends on where the samples sit, so the spread between')
-    print('  between the three methods is the uncertainty on a, not any single method\'s error')
-    print('  bar. Quote A.6 for per-lane numbers; quote this section for method sensitivity.')
+    print('  curvature depends on where the samples sit - which is precisely why the spread between')
+    print('  the three methods above is quoted as the uncertainty on a, not any single method\'s')
+    print('  error bar. Quote A.6 for per-lane numbers; quote this section for method sensitivity.')
 
     # --- can each method actually describe this track? ------------------------------------------
     # Converging is not the same as being applicable. A model whose functional form cannot represent
@@ -1435,8 +1304,8 @@ def height_time_fits(run, model=None, lane=None):
 def plot_fit_comparison(run):
     """The three height-time methods side by side."""
     # from the run
-    (t_fit, r_fit, FIT_OUT, t_dense, se_r, APPLICABLE, REF_TRACK, t0) = (
-        run.t_fit, run.r_fit, run.FIT_OUT, run.t_dense, run.se_r,
+    (t_fit, r_fit, FIT_OUT, FIT_COLOR, t_dense, se_r, APPLICABLE, REF_TRACK, t0) = (
+        run.t_fit, run.r_fit, run.FIT_OUT, run.FIT_COLOR, run.t_dense, run.se_r,
         run.APPLICABLE, run.REF_TRACK, run.t0
     )
 
@@ -1477,12 +1346,11 @@ def plot_fit_comparison(run):
         ax.grid(alpha=0.3)
         ax.legend(fontsize=7.5)
     _scaled = 'bands widened by sqrt(chi2) ' if INFLATE_BY_CHI2 else 'bands are the raw bootstrap 1$\sigma$ '
-    fig.suptitle(f'Height-time fit comparison, {REF_TRACK} track '
-                 f'({run.FIT_MODEL_NAME})\n'
+    fig.suptitle(f'Height-time fit comparison, {REF_TRACK} track ({REF_MODEL_NAME})\n'
                  + _scaled + f'over {N_BOOT} refits; dashed = the model cannot describe this track',
                  y=1.06, fontsize=12)
     fig.tight_layout()
-    save_fig(run, fig, 'typeii_kinematics_fit_comparison')
+    save_fig(fig, 'typeii_kinematics_fit_comparison')
     plt.show()
 
 
@@ -1535,86 +1403,6 @@ def model_sweep(run):
         row['r_at_B_Rsun'], row['r_at_B_Rsun_se'] = grid_scalar(agg[REF_TRACK], 'r', mask=_cms)
         sweep_rows.append(row)
 
-    # The same sweep for every upstream lane, so the B(r) figure can show one point per lane per
-    # model x fold. Kept apart from `sweep`, which stays the reference-track table every existing
-    # number is quoted from.
-    _ups = [run.SPLIT_PAIR[b][0] for b in run.BANDS_TRACED if run.SPLIT_PAIR[b][0] is not None]
-    all_rows, track_rows = [], []
-    for name, model in tqdm(MODEL_GRID.items(), desc='model x fold x lane', leave=False):
-        agg = aggregate_lanes(run, passes, tg, model)
-        for lab in _ups:
-            if lab not in agg:
-                continue
-            d = agg[lab]
-            row = {'model': name, 'lane': lab, 'band': run.LANE_BAND[lab]}
-            for key, col in [('r', 'r_Rsun'), ('v', 'v_kms'), ('B', 'B_G'), ('vA', 'vA_kms')]:
-                row[col], row[col + '_se'] = grid_scalar(d, key)
-            _cm = common_mask(d)
-            row['r_at_B_Rsun'], row['r_at_B_Rsun_se'] = grid_scalar(d, 'r', mask=_cm)
-            all_rows.append(row)
-    sweep_all = pd.DataFrame(all_rows)
-    sweep_all['base'] = [m.rsplit(' x', 1)[0] for m in sweep_all['model']]
-
-    # ---- B(r) sample by sample, for every model x fold x upstream lane -------------------------
-    # The window mean above answers "how strong", and only that. X, v_sh and n_e are each measured
-    # at every sample where both branches of a band exist, so B is a curve over that interval, and
-    # the curve is what a B(r) comparison actually needs. Computed on the EXPORT grid rather than
-    # the analysis grid tg: tg is spaced ~30 s, which leaves 7 samples across the fundamental's
-    # band-split window, and 7 points is not a curve.
-    #
-    # B is written for upstream lanes only. v_A from Rankine-Hugoniot is the UPSTREAM Alfven speed,
-    # so evaluating B = v_A sqrt(mu0 rho) with a downstream density returns neither branch's field
-    # (for a perpendicular shock the downstream field is X B_1, since B compresses with n).
-    tg_trk = np.arange(tg.min(), tg.max() + EXPORT_DT_S, EXPORT_DT_S)
-    track_rows = []
-    for name, model in tqdm(MODEL_GRID.items(), desc='B(r) per model x fold', leave=False):
-        agg = aggregate_lanes(run, passes, tg_trk, model, n_mc=EXPORT_N_MC)
-        for lab in _ups:
-            d = agg.get(lab)
-            if d is None:
-                continue
-            m = np.isfinite(d['B_mean']) & np.isfinite(d['r_mean'])
-            # Same guard the track export uses: keep only samples where EVERY realisation
-            # contributed. At a partly covered endpoint the mean is taken over a subset, and where
-            # a single draw survives the standard deviation is a std of one number - it comes back
-            # as 0.0 and reads as a sample with no uncertainty, which is the opposite of the truth.
-            for _k in ('B_n', 'r_n'):
-                if _k in d:
-                    m &= (d[_k] == d[_k].max())
-            if not m.any():
-                continue
-            track_rows.append(pd.DataFrame({
-                'model': name.rsplit(' x', 1)[0], 'fold': int(name.rsplit(' x', 1)[1]),
-                'model_fold': name, 'base': name.rsplit(' x', 1)[0],
-                'band': run.LANE_BAND[lab], 'lane': lab,
-                'role': run.LANE_ROLE.get(lab, ''), 'harmonic_s': HARM[run.LANE_BAND[lab]],
-                'time_UT': [(run.t0 + pd.Timedelta(seconds=float(x))).strftime('%H:%M:%S')
-                            for x in tg_trk[m]],
-                't_sec_from_window_start': tg_trk[m],
-                'f_MHz': d['f_mean'][m],
-                'ne_cm3': d['ne_mean'][m],
-                'r_Rsun': d['r_mean'][m], 'r_Rsun_sd': d['r_sd'][m],
-                'h_above_limb_Rsun': d['r_mean'][m] - R_LIMB_RSUN,
-                'v_kms': d['v_mean'][m], 'v_kms_sd': d['v_sd'][m],
-                'X': d['X_mean'][m], 'M_A': d['MA_mean'][m],
-                'vA_kms': d['vA_mean'][m], 'vA_kms_sd': d['vA_sd'][m],
-                'B_G': d['B_mean'][m], 'B_G_sd': d['B_sd'][m]}))
-    B_tracks = (pd.concat(track_rows, ignore_index=True) if track_rows
-                else pd.DataFrame(columns=['model_fold', 'base', 'fold', 'lane', 'band',
-                                           'r_Rsun', 'B_G', 'B_G_sd']))
-    run.set(B_tracks=B_tracks)
-    B_tracks.to_csv(os.path.join(OUTDIR, 'bfield_tracks.csv'), index=False)
-    if len(B_tracks):
-        _n = B_tracks.groupby(['model_fold', 'lane']).size()
-        print(f'\nbfield_tracks.csv: {len(B_tracks)} rows, {len(_n)} tracks '
-              f'(5 models x 4 folds x {B_tracks.lane.nunique()} upstream lanes), '
-              f'{_n.min()}-{_n.max()} samples each at {EXPORT_DT_S} s')
-        print('  B(r) per sample with the X, M_A, v_sh and n_e it was built from, so every point '
-              'is auditable.')
-    sweep_all['fold'] = [int(m.rsplit(' x', 1)[1]) for m in sweep_all['model']]
-    sweep_all.to_csv(os.path.join(OUTDIR, 'model_grid_sweep_all_lanes.csv'), index=False)
-    run.set(sweep_all=sweep_all)
-
     sweep = pd.DataFrame(sweep_rows)
     sweep['base'] = [m.rsplit(' x', 1)[0] for m in sweep['model']]
     sweep['fold'] = [int(m.rsplit(' x', 1)[1]) for m in sweep['model']]
@@ -1665,126 +1453,43 @@ def plot_model_sweep(run):
     fig.suptitle(f'Shock characteristics vs density model x fold ({REF_TRACK} track)',
                  y=1.01, fontsize=13)
     fig.tight_layout()
-    save_fig(run, fig, 'characteristics_vs_model_fold')
+    save_fig(fig, 'characteristics_vs_model_fold')
     plt.show()
 
 
-def plot_bfield(run, show_means=False, refs=None):
-    """Band-split magnetic field against the published radial profiles.
-
-    Draws B(r) as a track per model x fold x upstream lane. show_means=True additionally marks
-    each track's window-averaged value, which is the number the A.10 table quotes; it is off by
-    default because the mean answers only "how strong" and discards the shape the figure is for.
-
-    refs picks the published laws to draw over the tracks, defaulting to config.B_REF_CURVES.
-    Nothing from this event enters any of them; they are power laws evaluated at r.
-    """
-    # This figure is the B(r) tracks. Without them there is nothing here worth drawing, so say so
-    # instead of quietly producing a plot of window means that looks like the real thing.
-    trk = getattr(run, 'B_tracks', None)
-    if trk is None or not len(trk):
-        raise RuntimeError(
-            'no B(r) tracks on this run, so there is nothing to plot.\n'
-            '  run.B_tracks is written by pl.model_sweep(run), which has to run before this cell.\n'
-            '  If you did run it, the kernel is holding an older copy of the package than the one\n'
-            '  on disk: call t2.version() to check, and reload if it reports anything missing.')
-
+def plot_bfield(run):
+    """Band-split magnetic field against the published radial profiles."""
     # from the run
     sweep, bases, fold_col = run.sweep, run.bases, run.fold_col
 
-    # the reference curves have to span the data, or a track drawn past their end looks like it
-    # left the comparison rather than the curve having stopped being drawn
-    _rmax = 3.0
-    if getattr(run, 'B_tracks', None) is not None and len(run.B_tracks):
-        _rmax = max(_rmax, float(np.nanmax(run.B_tracks.r_Rsun)) * 1.03)
-    rr = np.linspace(1.05, _rmax, 400)
+    rr = np.linspace(1.05, 3, 300)
     fig = plt.figure(figsize=[9, 6.5])
     ax = fig.add_subplot(111)
-    # Published B(r) laws, drawn as reference only: each is its own published power law evaluated
-    # at r, with nothing from this event entering. Which ones appear is a choice, and the default
-    # excludes any law whose calibration range does not reach this burst - see B_REF_CURVES.
-    _REFS = {
-        'dulk_mclean': (B_dulk_mclean, 'k-',
-                        r'Dulk & McLean (1978), $0.5\,(r-1)^{-1.5}$'),
-        'mann2023': (B_mann2023, 'k:',
-                     r'Mann et al. (2023) Eq. 8, $6r^{-3}+1.18r^{-2}$'),
-        'gopalswamy_yashiro': (B_gopalswamy_yashiro, 'k--',
-                               r'Gopalswamy & Yashiro (2011), $0.409\,r^{-1.30}$ (standoff'
-                               '\n' r'    distance, calibrated 6$-$23 $R_\odot$, extrapolated here)'),
-    }
-    _use = list(B_REF_CURVES if refs is None else refs)
-    _bad = [k for k in _use if k not in _REFS]
-    if _bad:
-        raise ValueError(f'unknown reference curve(s) {_bad}; choose from {sorted(_REFS)}')
-    for _k in _use:
-        _fn, _ls, _lab = _REFS[_k]
-        ax.plot(rr, _fn(rr), _ls, label=_lab)
-    _off = [k for k in _REFS if k not in _use]
-    if _off:
-        print('reference B(r) laws drawn: ' + ', '.join(_use))
-        print('  not drawn: ' + ', '.join(_off)
-              + '. Gopalswamy & Yashiro (2011) is calibrated over 6-23 Rsun from CME-shock\n'
-                '  standoff distances; this burst sits at 1.3-4 Rsun, so the curve would be '
-                'extrapolated\n  well below its range and constrains nothing here. Pass refs=(...) '
-                'to include it.')
+    ax.plot(rr, B_dulk_mclean(rr), 'k-',
+            label=r'Dulk & McLean (1978), $0.5\,(r-1)^{-1.5}$')
+    ax.plot(rr, B_gopalswamy_yashiro(rr), 'k--',
+            label=r'Gopalswamy & Yashiro (2011), $0.409\,r^{-1.30}$ (standoff distance,'
+                  '\n' r'    calibrated 6$-$23 $R_\odot$, extrapolated here)')
+    ax.plot(rr, B_mann2023(rr), 'k:',
+            label=r'Mann et al. (2023) Eq. 8, $6r^{-3}+1.18r^{-2}$')
 
     mk = {'Newkirk': 'o', 'Saito': 's', 'Leblanc': '^', 'Baumbach-Allen': 'D', 'Mann 2023': 'v'}
-    # B is a TRACK, not a point. X(t) is measured at every grid sample on the band-split window and
-    # v_sh(t) and n_e(t) are too, so B(r) is defined wherever both branches of a band exist. Each
-    # model x fold x upstream lane therefore traces out a curve, and drawing only the window mean
-    # discards the one thing this plot is for: whether B(r) FALLS LIKE the published laws over the
-    # range the burst covers, which no single point can show.
-    #
-    # The marker on each curve is the window-averaged value from the A.8 sweep, which is the number
-    # quoted in the table and the text. Its x is r_at_B_Rsun, the mean height on the band-split
-    # window, NOT the lane-average r_Rsun: B only exists on that window and the reference curves are
-    # steep, so the pair has to share one interval.
-    #
-    # Marker is the density model, colour the fold, filled for the fundamental and open for the
-    # harmonic.
-    tab = run.sweep_all if hasattr(run, 'sweep_all') else sweep.assign(band='F')
-    bands = [b for b in ('F', 'H') if b in set(tab.get('band', []))]
-    face = {b: (None if i == 0 else 'none') for i, b in enumerate(bands)}
-
-    for (mf, lab), g in trk.groupby(['model_fold', 'lane'], sort=False):
-            g = g.sort_values('r_Rsun')
-            col = fold_col[int(g.fold.iloc[0])]
-            band = str(g.band.iloc[0])
-            ax.plot(g.r_Rsun, g.B_G, '-', color=col, lw=1.6, alpha=0.85, zorder=2)
-            # The Monte-Carlo 1 sigma is 2-3% of B, which on this log axis is 0.02 decades out of
-            # 1.2 - under two pixels. It is shaded here for completeness and shown at readable
-            # size as a single representative bar below, because a ribbon nobody can see is worse
-            # than no ribbon: it implies the errors were left out.
-            ax.fill_between(g.r_Rsun, g.B_G - g.B_G_sd, g.B_G + g.B_G_sd,
-                            color=col, alpha=0.30, lw=0, zorder=1)
-            # one marker per track, at its low-r end, so the density model stays identifiable
-            # without the window-mean point
-            ax.plot(g.r_Rsun.iloc[0], g.B_G.iloc[0], mk.get(str(g.base.iloc[0]), 'o'),
-                    color=col, mfc=(col if face.get(band) is None else 'none'),
-                    mec=col, mew=1.3, ms=6, zorder=3)
-    if show_means:
-        for _, row in tab.iterrows():
-            if not (np.isfinite(row['r_at_B_Rsun']) and np.isfinite(row['B_G'])):
-                continue
-            col = fold_col[row['fold']]
-            mfc = col if face.get(row.get('band', 'F')) is None else 'none'
+    # x is r_at_B_Rsun, the height on the band-split window, NOT the lane-average r_Rsun of the A.8
+    # table. B only exists on that window, and the reference curves are steep functions of r, so the
+    # pair has to share one interval or the comparison is against the wrong part of the curve.
+    for _, row in sweep.iterrows():
+        if np.isfinite(row['r_at_B_Rsun']) and np.isfinite(row['B_G']):
             ax.errorbar(row['r_at_B_Rsun'], row['B_G'], yerr=row['B_G_se'],
                         xerr=row['r_at_B_Rsun_se'],
-                        fmt=mk[row['base']], color=col, mfc=mfc, ms=8, capsize=2,
-                        mec=col, mew=1.4, alpha=0.95, zorder=3)
-    if not np.isfinite(tab['B_G']).any():
+                        fmt=mk[row['base']], color=fold_col[row['fold']], ms=8, capsize=2,
+                        mec='k', mew=0.5, alpha=0.9)
+    if not np.isfinite(sweep['B_G']).any():
         ax.text(0.5, 0.5, 'no band-split estimate to plot: $B$ is NaN for every model.\n'
                 '$B = v_A\\sqrt{\\mu_0\\rho}$ needs $M_A$, which is only defined for '
                 '$1 \\leq X < 4$.\nCheck the upstream/downstream ordering printed in A.4.',
                 transform=ax.transAxes, ha='center', va='center', fontsize=10, color='firebrick')
     handles = [plt.Line2D([], [], marker=mk[b], color='0.4', ls='', mec='k', label=b) for b in bases]
-    handles += [plt.Line2D([], [], marker='o', color=fold_col[f], ls='', label=f'fold {f}')
-                for f in FOLDS]
-    handles += [plt.Line2D([], [], marker='o', color='0.3', ls='',
-                           mfc=('0.3' if face[b] is None else 'none'), mec='0.3', mew=1.4,
-                           label=f'{BAND_NAME[b]} ({run.SPLIT_PAIR[b][0]})') for b in bands]
-    handles += [plt.Line2D([], [], color='0.5', lw=1.6, alpha=0.85,
-                           label='$B(r)$ along the band-split window')]
+    handles += [plt.Line2D([], [], marker='o', color=fold_col[f], ls='', label=f'fold {f}') for f in FOLDS]
     # Both legends stack in the top-right corner. The lower-left placement sat on top of the
     # Gopalswamy & Yashiro curve, which is the one the reader most needs to see is extrapolated.
     leg1 = ax.legend(loc='upper right', bbox_to_anchor=(1, 1), borderaxespad=0.4, fontsize=9)
@@ -1792,67 +1497,13 @@ def plot_bfield(run, show_means=False, refs=None):
     _h1 = leg1.get_window_extent().transformed(ax.transAxes.inverted()).height
     ax.legend(handles=handles, loc='upper right', bbox_to_anchor=(1, 1 - _h1 - 0.03),
               borderaxespad=0.4, fontsize=8, ncol=2, title='band-split estimate')
-    # --- put the two uncertainties on the same picture, at readable size ------------------------
-    # statistical: one representative Monte-Carlo error bar, since the per-track ribbons are too
-    # thin to read. systematic: the vertical spread of the 40 curves at a fixed height, which is
-    # what actually dominates and is already on the plot.
-    if trk is not None and len(trk):
-        _rel = (trk.B_G_sd / trk.B_G).median()
-        _r0 = float(trk.r_Rsun.quantile(0.02))
-        _b0 = float(trk.B_G.median())
-        ax.errorbar(_r0, _b0, yerr=_b0 * _rel, fmt='none', ecolor='0.15', elinewidth=1.6,
-                    capsize=4, capthick=1.6, zorder=6)
-        ax.annotate('Monte-Carlo 1$\\sigma$\n' + f'({100 * _rel:.1f}% of $B$)',
-                    xy=(_r0, _b0), xytext=(6, 0), textcoords='offset points',
-                    ha='left', va='center', fontsize=8, color='0.15')
-        # the systematic, measured where the most tracks overlap in height
-        _spread = []
-        for _lab, _g in trk.groupby('lane'):
-            _rc = _g.r_Rsun.median()
-            _near = _g.loc[(_g.r_Rsun - _rc).abs().groupby(_g.model_fold).idxmin()]
-            _spread.append((_lab, _rc, _near.B_G.min(), _near.B_G.max()))
-        run.set(B_spread=_spread)
-        print('the two uncertainties on B, at a glance:')
-        print(f'  statistical (Monte Carlo)  {100 * _rel:.1f}% of B, the same everywhere')
-        for _lab, _rc, _lo, _hi in _spread:
-            print(f'  density model ({_lab})  at r = {_rc:.2f} Rsun, B spans {_lo:.3f}-{_hi:.3f} G '
-                  f'= a factor of {_hi / _lo:.1f}')
-        print('  the model choice dominates by roughly two orders of magnitude. The visible '
-              'spread of the\n  curves IS the error bar that matters; the shaded ribbon on each '
-              'curve is the other one.')
-
-    # the slope is the point of drawing the tracks at all: quote it rather than leave it to the eye
-    if trk is not None and len(trk):
-        _sl = []
-        for (mf, lab), g in trk.groupby(['model_fold', 'lane'], sort=False):
-            if len(g) < 4:
-                continue
-            g = g.sort_values('r_Rsun')
-            _sl.append({'lane': lab,
-                        'delta': -np.polyfit(np.log(g.r_Rsun), np.log(g.B_G), 1)[0]})
-        if _sl:
-            _sl = pd.DataFrame(_sl)
-            run.set(B_slopes=_sl)
-            print('radial slope of each band-split track, B ~ r^-delta:')
-            for lab, x in _sl.groupby('lane'):
-                print(f'  {lab:10s} delta = {x.delta.median():.2f} '
-                      f'(range {x.delta.min():.2f}-{x.delta.max():.2f} over {len(x)} model x folds)')
-            print('  for comparison: Dulk & McLean 1.5 (in r-1), Gopalswamy & Yashiro 1.30, '
-                  'Mann et al. Eq. 8 about 2.2')
-            print('  the slope is NOT independent of the kinematics: B = (v_sh/M_A) sqrt(mu0 rho), so a '
-                  'lane that\n  accelerates through its band-split window flattens its own B(r).')
     ax.set_yscale('log')
     ax.set_xlabel(r'$r\,/\,R_\odot$  (on the band-split window, where $B$ is defined)')
     ax.set_ylabel(r'$B$ [G]')
-    ax.set_title('Coronal magnetic field: band-split estimate vs empirical laws\n'
-                 f'B(r) per density model, fold and upstream lane '
-                 f'({0 if trk is None else trk.groupby(["model_fold", "lane"]).ngroups} tracks); '
-                 f'shaded ribbon = Monte-Carlo 1$\\sigma$ (2-3% of $B$)'
-                 + ('; marker at each track start = density model'
-                    if not show_means else '; large marker = window mean'))
+    ax.set_title('Coronal magnetic field: band-split estimate vs empirical laws')
     ax.grid(alpha=0.3, which='both')
     fig.tight_layout()
-    save_fig(run, fig, 'Bfield_comparison')
+    save_fig(fig, 'Bfield_comparison')
     plt.show()
 
 
@@ -2243,13 +1894,6 @@ def export_tracks(run):
                 continue
             band = LANE_BAND[lab]
             t_utc = [t0 + pd.Timedelta(seconds=float(x)) for x in tg_exp[ok]]
-            # B belongs to the UPSTREAM branch only. v_A from Rankine-Hugoniot is the upstream
-            # Alfven speed, so v_A * sqrt(mu0 rho) evaluated with the downstream density and the
-            # downstream lane's own speed is neither B_1 nor the downstream field (which for a
-            # perpendicular shock is X B_1, since B is compressed with the density). A.4 already
-            # refuses to print it; exporting it would ship a column the run itself calls undefined.
-            _is_up = str(LANE_ROLE.get(lab, '')).startswith('upstream')
-            _B = d['B_mean'][ok] if _is_up else np.full(int(ok.sum()), np.nan)
             rows.append(pd.DataFrame({
                 'model': base, 'fold': int(fold), 'model_fold': mf_name,
                 'band': band, 'lane': lab, 'role': LANE_ROLE.get(lab, ''),
@@ -2263,10 +1907,10 @@ def export_tracks(run):
                 'r_err_Rsun': d['r_sd'][ok],
                 'h_above_limb_Rsun': d['r_mean'][ok] - R_LIMB_RSUN,
                 'v_kms': d['v_mean'][ok],
-                'B_G': _B}))
+                'B_G': d['B_mean'][ok]}))
             v_, ev_ = grid_scalar(d, 'v')
             a_, ea_ = grid_scalar(d, 'a')
-            B_, eB_ = grid_scalar(d, 'B') if _is_up else (np.nan, np.nan)
+            B_, eB_ = grid_scalar(d, 'B')
             summary.append({
                 'model': base, 'fold': int(fold), 'model_fold': mf_name, 'band': band, 'lane': lab,
                 'role': LANE_ROLE.get(lab, ''),
@@ -2337,46 +1981,6 @@ def export_tracks(run):
     model_summary.head(8).round(3)
 
 
-def manifest(run):
-    """List everything this run wrote, and say how to reproduce it.
-
-    The last cell of the notebook. It exists so that what a colleague receives is a closed set:
-    the inputs are named, the outputs are listed, and anything in OUTDIR that this run did not
-    write is called out rather than quietly shipped alongside.
-    """
-    OUTDIR, RUN_START = run.OUTDIR, run.RUN_START
-    files = sorted(f for f in os.listdir(OUTDIR) if not f.startswith('.'))
-    mine = [f for f in files if os.path.getmtime(os.path.join(OUTDIR, f)) >= RUN_START]
-    stale = [f for f in files if f not in mine]
-    rows = [{'file': f, 'kind': ('figure' if f.endswith('.png') else
-                                 'table' if f.endswith(('.csv', '.tex')) else
-                                 'text' if f.endswith('.md') else 'data'),
-             'kB': round(os.path.getsize(os.path.join(OUTDIR, f)) / 1024, 1)} for f in mine]
-    man = pd.DataFrame(rows)
-    man.to_csv(os.path.join(OUTDIR, 'MANIFEST.csv'), index=False)
-    run.set(manifest_table=man)
-
-    print(f'{len(mine)} file(s) written to {OUTDIR}')
-    for kind, grp in man.groupby('kind'):
-        print(f'  {len(grp):2d} {kind:7s} {grp.kB.sum():8.1f} kB   ' + ', '.join(grp.file[:3])
-              + (', ...' if len(grp) > 3 else ''))
-    if stale:
-        print(f'\n  *** {len(stale)} file(s) in OUTDIR were NOT written by this run: '
-              + ', '.join(stale))
-        print('      delete them or use a fresh OUTDIR before sharing the folder.')
-
-    print('\nto reproduce this run from scratch, a colleague needs three things:')
-    print(f'  1. the two dynamic-spectrum pickles (Stokes I and V/I) for {run.EVENT_DATE}')
-    print(f'  2. {CONTROLS_FILE}, in this folder - the Bezier control points the lanes were '
-          'placed with')
-    print('  3. the typeii package and this notebook, run top to bottom with the tracer cell '
-          'left on\n     the load_controls line')
-    print('every number below that is deterministic: same spectra + same control points + same '
-          'seed\n-> byte-identical CSVs. Nothing else in the chain draws a random number that is '
-          'not seeded.')
-    return man
-
-
 def plot_export_tracks(run):
     """Every exported height-time track, above the limb."""
     # from the run
@@ -2411,5 +2015,5 @@ def plot_export_tracks(run):
     fig.suptitle('Type II height-time track under every density model x fold\n'
                  'heights are ABOVE THE LIMB; add 1 Rsun for heliocentric r', y=1.02, fontsize=11)
     fig.tight_layout()
-    save_fig(run, fig, 'height_time_all_models')
+    save_fig(fig, 'height_time_all_models')
     plt.show()

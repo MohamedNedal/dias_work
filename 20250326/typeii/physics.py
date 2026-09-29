@@ -37,7 +37,8 @@ def order_lanes(run, labs):
     key = {l: float(np.nanmean(lane_deriv(fits[l], ts)[0])) for l in labs}
     return sorted(labs, key=lambda l: key[l]), key, note
 
-def realise_lanes(run, fits, tg, invert, rng=None, sample=False, mu=MU):
+def realise_lanes(run, fits, tg, invert, rng=None, sample=False, mu=MU,
+                  kin_method=None):
     """One realisation of r, v, a, v_A, B, X and M_A for every lane.
 
     Each lane uses its band's harmonic number. B additionally needs that band's
@@ -79,7 +80,7 @@ def realise_lanes(run, fits, tg, invert, rng=None, sample=False, mu=MU):
                 r_d = _to_r(eval_lane(_lf, cf[lab], t_d), b)[0]
             v, a = kinematics(r, tg, span=np.isfinite(fval[lab]),
                               baseline=(float(_lf['tmax'] - _lf['tmin']) if _lf else None),
-                              t_fit=t_d, r_fit=r_d)
+                              t_fit=t_d, r_fit=r_d, method=kin_method)
             vA = v / MA
             B = (vA * 1e3) * np.sqrt(MU0 * mu * M_P * (ne_t * 1e6)) * 1e4      # Gauss
             out[lab] = dict(r=r, v=v, a=a, vA=vA, B=B, X=X, MA=MA, ne=ne_t, f=fval[lab])
@@ -160,7 +161,7 @@ def lane_windows(d, lab, tgrid, t_ref, roles=None, upstream=None):
             out[k + '_split'], out[k + '_split_e'] = grid_scalar(d, k, mask=cm)
     return out
 
-def aggregate_lanes(run, passes, tg, model, n_mc=N_MC, seed=0):
+def aggregate_lanes(run, passes, tg, model, n_mc=N_MC, seed=0, kin_method=None):
     """Monte-Carlo aggregation per track, combining the fit and repeat errors."""
     # state this step works on
     ALL_TRACKS = run.ALL_TRACKS
@@ -172,7 +173,8 @@ def aggregate_lanes(run, passes, tg, model, n_mc=N_MC, seed=0):
     stacks = {k: {kk: [] for kk in AGG_KEYS} for k in ALL_TRACKS}
     for fits in fitsets:
         for _ in range(n_mc):
-            res = realise_lanes(run, fits, tg, invert, rng=rng, sample=True)
+            res = realise_lanes(run, fits, tg, invert, rng=rng, sample=True,
+                            kin_method=kin_method)
             for key, d in res.items():
                 for kk in AGG_KEYS:
                     stacks[key][kk].append(d[kk])

@@ -230,8 +230,14 @@ def accel_bias_floor(run, fit, band, invert, v_ref=None):
                                ne[::-1], rr[::-1])
     return float(np.nanmean(kinematics(to_r(tgs), tgs, t_fit=td, r_fit=to_r(td))[1]))
 
-def kinematics(r, tg, deg=None, span=None, baseline=None, t_fit=None, r_fit=None):
+def kinematics(r, tg, deg=None, span=None, baseline=None, t_fit=None, r_fit=None,
+               method=None):
     """Speed [km/s] and acceleration [m/s^2] from a height track r(t) [Rsun].
+
+    method picks how r(t) is differentiated. None fits a polynomial of degree KIN_DEG, which is
+    the default everywhere. A key of FIT_METHODS ("Polynomial", "Gallagher (2003)",
+    "Byrne (2013)") uses that model instead, so the speed and acceleration panels can be built
+    with any of the three.
 
     Blanked where r is NaN, and where the speed is inward or above 3000 km/s.
     """
@@ -261,14 +267,22 @@ def kinematics(r, tg, deg=None, span=None, baseline=None, t_fit=None, r_fit=None
     r_range = (np.nanmax(rf) - np.nanmin(rf)) if n_used > 3 else 0
     if (n_used >= KIN_MIN_PTS and frac >= KIN_MIN_FRAC
             and r_range > 0.01 and n_used > deg + 1 and good.any()):
-        dg = deg
-        pr = np.polyfit(tf, rf, dg)
-        v = np.polyval(np.polyder(pr, 1), tg) * R_SUN_M / 1e3
-        # A straight line has no second derivative to report. Returning the 0.0 that polyder
-        # hands back would put a hard "a = 0.0 +/- 0.0" in the tables, which reads as a measured
-        # null result rather than the absence of a measurement. NaN says the right thing.
-        a = (np.polyval(np.polyder(pr, 2), tg) * R_SUN_M if dg >= 2
-             else np.full_like(tg, np.nan))
+        if method:
+            # The published height-time models work in km, and their splines are only defined
+            # over the fitted span, so evaluate on a clipped grid and blank outside it below.
+            fit = FIT_METHODS[method](tf, rf * (R_SUN_M / 1e3), None)
+            tc = np.clip(tg, tf.min(), tf.max())
+            v = np.asarray(fit['v'](tc), float)
+            a = np.asarray(fit['a'](tc), float)
+        else:
+            dg = deg
+            pr = np.polyfit(tf, rf, dg)
+            v = np.polyval(np.polyder(pr, 1), tg) * R_SUN_M / 1e3
+            # A straight line has no second derivative to report. Returning the 0.0 that polyder
+            # hands back would put a hard "a = 0.0 +/- 0.0" in the tables, which reads as a
+            # measured null result instead of the absence of a measurement. NaN says it properly.
+            a = (np.polyval(np.polyder(pr, 2), tg) * R_SUN_M if dg >= 2
+                 else np.full_like(tg, np.nan))
         # blank the derivatives outside the span this track was traced over: each band covers a
         # different part of the burst, and a cubic extrapolated past its data runs away fast
         v[~good] = np.nan
